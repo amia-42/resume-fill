@@ -228,7 +228,10 @@
       }
 
       const cacheSignature = createMappingCacheSignature(scan.fields);
-      const cacheKey = createMappingCacheKeyFromSignature(cacheSignature);
+      const cacheKey = createMappingCacheKeyFromSignature(
+        cacheSignature,
+        buildCustomFieldsCacheSalt(resumeProfile)
+      );
       let mappings = null;
       let cacheHit = false;
 
@@ -2335,13 +2338,36 @@
     );
   }
 
-  function createMappingCacheKey(fields) {
-    return createMappingCacheKeyFromSignature(createMappingCacheSignature(fields));
+  function createMappingCacheKey(fields, extraSalt = "") {
+    return createMappingCacheKeyFromSignature(
+      createMappingCacheSignature(fields),
+      extraSalt
+    );
   }
 
-  function createMappingCacheKeyFromSignature(signature) {
-    const base = `${location.origin}${location.pathname}::${JSON.stringify(signature)}`;
+  function createMappingCacheKeyFromSignature(signature, extraSalt = "") {
+    const base = `${location.origin}${location.pathname}::${JSON.stringify(signature)}${
+      extraSalt ? `::${extraSalt}` : ""
+    }`;
     return `${location.host}:${hashString(base)}`;
+  }
+
+  function buildCustomFieldsCacheSalt(profile) {
+    const parts = [];
+
+    for (const [sectionKey, sectionData] of Object.entries(profile || {})) {
+      const rows = sectionData?.customFields;
+      if (!Array.isArray(rows)) continue;
+
+      const names = rows
+        .map((item) => String(item?.name || "").trim())
+        .filter(Boolean);
+      if (names.length) {
+        parts.push(`${sectionKey}:${names.join("|")}`);
+      }
+    }
+
+    return parts.length ? `cf:${parts.join(";")}` : "";
   }
 
   function createStableCacheFieldSignature(field, index = 0) {

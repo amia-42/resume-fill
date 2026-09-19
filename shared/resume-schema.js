@@ -451,6 +451,9 @@
     },
   ];
 
+  // 每个 group 区块内可附加的自定义字段上限
+  const CUSTOM_FIELD_SLOTS = 12;
+
   const FIELD_VALUE_ALIASES = {
     personal: {
       birthDate: ["birthday", "birth", "dob", "birthMonth", "birthYearMonth", "出生年月"],
@@ -791,6 +794,19 @@
     }
   }
 
+  function normalizeCustomFieldRows(rawRows) {
+    if (!Array.isArray(rawRows)) return [];
+
+    return rawRows
+      .slice(0, CUSTOM_FIELD_SLOTS)
+      .filter((item) => item && typeof item === "object")
+      .map((item) => ({
+        name: String(item.name ?? "").trim().slice(0, 60),
+        value: normalizeFieldValue({ input: "text" }, item.value),
+      }))
+      .filter((item) => item.name || item.value);
+  }
+
   function normalizeResumeProfile(input) {
     const source = input && typeof input === "object" ? input : {};
     const profile = createEmptyResumeProfile();
@@ -807,6 +823,11 @@
           if (rawValue == null || rawValue === "") continue;
           profile[section.key][field.key] = normalizeFieldValue(field, rawValue);
         }
+
+        // group 区块内用户手动添加的自定义字段，不参与 AI 导入
+        profile[section.key].customFields = normalizeCustomFieldRows(
+          rawGroup.customFields
+        );
         continue;
       }
 
@@ -867,6 +888,27 @@
             input: field.input,
             placeholder: field.placeholder || "",
             options: field.options || [],
+          });
+        }
+
+        // 区块内自定义字段：只把 value 暴露给映射目录，name 仅作为匹配标签
+        const customRows = Array.isArray(profile?.[section.key]?.customFields)
+          ? profile[section.key].customFields
+          : [];
+        const customSlotCount =
+          mode === "max" ? CUSTOM_FIELD_SLOTS : customRows.length;
+
+        for (let slotIndex = 0; slotIndex < customSlotCount; slotIndex += 1) {
+          const customName = String(customRows[slotIndex]?.name || "").trim();
+          fields.push({
+            path: `${section.key}.customFields.${slotIndex}.value`,
+            sectionKey: section.key,
+            sectionLabel: section.label,
+            label:
+              customName || `${section.label} / 自定义字段 ${slotIndex + 1}`,
+            input: "text",
+            placeholder: "",
+            options: [],
           });
         }
         continue;
@@ -942,7 +984,8 @@
   }
 
   window.ResumeSchema = {
-    version: 4,
+    version: 5,
+    customFieldSlots: CUSTOM_FIELD_SLOTS,
     sections: SECTION_DEFINITIONS,
     clone,
     getSectionDefinition,

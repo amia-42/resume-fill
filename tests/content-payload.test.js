@@ -70,3 +70,39 @@ test("buildFieldMappingPayload only includes resume fields with values", () => {
   assert.deepEqual(paths, ["personal.email", "personal.fullName"]);
   assert.ok(payload.resumeFields.every((field) => field.hasValue === true));
 });
+
+test("buildFieldMappingPayload exposes section custom fields with user-defined labels", () => {
+  const helpers = loadPayloadHelpers();
+  const profile = helpers.schema.createEmptyResumeProfile();
+  profile.personal.fullName = "张三";
+  profile.personal.customFields = [
+    { name: "生源地", value: "浙江" },
+    { name: "政治面貌", value: "" },
+  ];
+
+  const payload = helpers.buildFieldMappingPayload(
+    [{ fieldId: "f_1", label: "生源地", kind: "text" }],
+    profile
+  );
+
+  const customEntry = payload.resumeFields.find(
+    (field) => field.path === "personal.customFields.0.value"
+  );
+  assert.equal(customEntry.label, "生源地");
+  assert.equal(customEntry.sectionLabel, "基本信息");
+  assert.equal(customEntry.valuePreview, "浙江");
+  assert.equal(
+    payload.resumeFields.some((field) => field.path === "personal.fullName"),
+    true
+  );
+  assert.equal(
+    payload.resumeFields.some(
+      (field) => field.path === "personal.customFields.1.value"
+    ),
+    false
+  );
+  assert.equal(
+    payload.resumeFields.some((field) => field.path.endsWith(".name")),
+    false
+  );
+});

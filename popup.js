@@ -665,6 +665,21 @@ function initResumeEditorEvents() {
         removeBtn.dataset.sectionRemove,
         Number(removeBtn.dataset.itemIndex)
       );
+      return;
+    }
+
+    const customAddBtn = event.target.closest("[data-custom-add]");
+    if (customAddBtn) {
+      addSectionCustomField(customAddBtn.dataset.customAdd);
+      return;
+    }
+
+    const customRemoveBtn = event.target.closest("[data-custom-remove]");
+    if (customRemoveBtn) {
+      removeSectionCustomField(
+        customRemoveBtn.dataset.customRemove,
+        Number(customRemoveBtn.dataset.itemIndex)
+      );
     }
   });
 }
@@ -1002,6 +1017,7 @@ function renderResumeEditor(profile) {
 
     if (section.type === "group") {
       bodyEl.appendChild(renderFieldGrid(section.fields, profile, section.key));
+      bodyEl.appendChild(renderSectionCustomFields(section, profile));
     } else {
       const items = Array.isArray(profile[section.key]) ? profile[section.key] : [];
       for (let slotIndex = 0; slotIndex < items.length; slotIndex += 1) {
@@ -1125,6 +1141,96 @@ function renderFieldGrid(fields, profile, prefix) {
   }
 
   return gridEl;
+}
+
+function renderSectionCustomFields(section, profile) {
+  const host = document.createElement("div");
+  host.className = "resume-custom-fields";
+
+  const rows = Array.isArray(profile?.[section.key]?.customFields)
+    ? profile[section.key].customFields
+    : [];
+
+  const headEl = document.createElement("div");
+  headEl.className = "resume-custom-fields-head";
+
+  const titleEl = document.createElement("span");
+  titleEl.className = "resume-custom-fields-title";
+  titleEl.textContent = "自定义字段";
+
+  const addBtn = document.createElement("button");
+  addBtn.type = "button";
+  addBtn.className = "btn-text resume-custom-fields-add";
+  addBtn.dataset.customAdd = section.key;
+  addBtn.textContent = "+ 添加自定义字段";
+  addBtn.disabled = rows.length >= schema.customFieldSlots;
+
+  headEl.appendChild(titleEl);
+  headEl.appendChild(addBtn);
+  host.appendChild(headEl);
+
+  const hintEl = document.createElement("div");
+  hintEl.className = "resume-custom-fields-hint";
+  hintEl.textContent =
+    "补充本区块没有的字段（如“生源地”“政治面貌”），会与标准字段一起参与 AI 字段映射。";
+  host.appendChild(hintEl);
+
+  for (let index = 0; index < rows.length; index += 1) {
+    const rowEl = document.createElement("div");
+    rowEl.className = "resume-custom-field-row";
+
+    const nameField = document.createElement("div");
+    nameField.className = "resume-field";
+    const nameLabel = document.createElement("label");
+    nameLabel.className = "resume-field-label";
+    nameLabel.textContent = "字段名";
+    const nameInput = createCustomFieldInput(
+      `${section.key}.customFields.${index}.name`,
+      rows[index]?.name || "",
+      "如：生源地"
+    );
+    nameField.appendChild(nameLabel);
+    nameField.appendChild(nameInput);
+
+    const valueField = document.createElement("div");
+    valueField.className = "resume-field";
+    const valueLabel = document.createElement("label");
+    valueLabel.className = "resume-field-label";
+    valueLabel.textContent = "字段值";
+    const valueInput = createCustomFieldInput(
+      `${section.key}.customFields.${index}.value`,
+      rows[index]?.value || "",
+      "要填入页面的值"
+    );
+    valueField.appendChild(valueLabel);
+    valueField.appendChild(valueInput);
+
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "btn-text resume-custom-field-remove";
+    removeBtn.dataset.customRemove = section.key;
+    removeBtn.dataset.itemIndex = String(index);
+    removeBtn.textContent = "删除";
+
+    rowEl.appendChild(nameField);
+    rowEl.appendChild(valueField);
+    rowEl.appendChild(removeBtn);
+    host.appendChild(rowEl);
+  }
+
+  return host;
+}
+
+function createCustomFieldInput(path, value, placeholder) {
+  const input = document.createElement("input");
+  input.className = "resume-input";
+  input.type = "text";
+  input.placeholder = placeholder || "";
+  input.dataset.resumePath = path;
+  input.value = value == null ? "" : String(value);
+  input.addEventListener("input", markResumeDirty);
+  input.addEventListener("change", markResumeDirty);
+  return input;
 }
 
 function createFieldControl(field, value, path) {
@@ -1338,6 +1444,47 @@ function removeResumeListItem(sectionKey, itemIndex) {
   openResumeSection(sectionKey);
 }
 
+function addSectionCustomField(sectionKey) {
+  const section = schema.getSectionDefinition(sectionKey);
+  if (!section || section.type !== "group") return;
+
+  const nextProfile = syncResumeProfileFromForm();
+  const group = { ...(nextProfile[sectionKey] || {}) };
+  const rows = Array.isArray(group.customFields) ? [...group.customFields] : [];
+  if (rows.length >= schema.customFieldSlots) return;
+
+  rows.push({ name: "", value: "" });
+  group.customFields = rows;
+  nextProfile[sectionKey] = group;
+  resumeProfile = nextProfile;
+
+  collapsedResumeSections.delete(sectionKey);
+  renderResumeEditor(resumeProfile);
+  markResumeDirty();
+  focusResumeField(`${sectionKey}.customFields.${rows.length - 1}.name`);
+}
+
+function removeSectionCustomField(sectionKey, itemIndex) {
+  const section = schema.getSectionDefinition(sectionKey);
+  if (!section || section.type !== "group") return;
+
+  const nextProfile = syncResumeProfileFromForm();
+  const group = { ...(nextProfile[sectionKey] || {}) };
+  const rows = Array.isArray(group.customFields) ? [...group.customFields] : [];
+  if (!Number.isInteger(itemIndex) || itemIndex < 0 || itemIndex >= rows.length) {
+    return;
+  }
+
+  rows.splice(itemIndex, 1);
+  group.customFields = rows;
+  nextProfile[sectionKey] = group;
+  resumeProfile = nextProfile;
+
+  renderResumeEditor(resumeProfile);
+  markResumeDirty();
+  openResumeSection(sectionKey);
+}
+
 async function persistResumeProfile({ silent = false } = {}) {
   const nextProfile = collectResumeProfileFromForm();
 
@@ -1440,6 +1587,15 @@ async function importResumeToSchema(rawText) {
     const aiText = await aiClient.callAI(activeModel.id, prompt, "resume_import");
     const parsed = parseJsonFromAiText(aiText);
     const normalized = schema.normalizeResumeProfile(parsed);
+    // 各区块的自定义字段由用户手动维护，AI 导入不覆盖
+    const currentProfile = syncResumeProfileFromForm();
+    for (const section of schema.sections) {
+      if (section.type !== "group") continue;
+      const rows = currentProfile?.[section.key]?.customFields;
+      if (Array.isArray(rows) && rows.length) {
+        normalized[section.key].customFields = schema.clone(rows);
+      }
+    }
 
     resumeProfile = normalized;
     await resumeStorage.saveTemplateContent(activeTemplateId, {

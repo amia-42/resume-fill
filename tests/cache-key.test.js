@@ -27,6 +27,7 @@ function loadCacheKeyHelpers() {
       normalizeCacheText,
       describeMappingCacheLookup,
       summarizeCacheSignatureDifference,
+      buildCustomFieldsCacheSalt,
     };
   `;
 
@@ -134,4 +135,51 @@ test("describeMappingCacheLookup explains same-page cache misses", () => {
   assert.match(result.reason, /同页面已有1条缓存/);
   assert.match(result.reason, /字段签名已变化/);
   assert.match(result.reason, /label 公司名称 -> 公司简称/);
+});
+
+test("mapping cache key stays stable without custom fields and rotates on rename", () => {
+  const helpers = loadCacheKeyHelpers();
+  const fields = [
+    {
+      kind: "text",
+      label: "生源地",
+      placeholder: "",
+      inputType: "text",
+      options: [],
+    },
+  ];
+  const signature = helpers.createMappingCacheSignature(fields);
+
+  const legacyKey = helpers.createMappingCacheKeyFromSignature(signature);
+  const noCustomKey = helpers.createMappingCacheKeyFromSignature(
+    signature,
+    helpers.buildCustomFieldsCacheSalt({
+      personal: { fullName: "张三", customFields: [{ name: "", value: "" }] },
+    })
+  );
+  assert.equal(noCustomKey, legacyKey);
+
+  const saltedKey = helpers.createMappingCacheKeyFromSignature(
+    signature,
+    helpers.buildCustomFieldsCacheSalt({
+      personal: { customFields: [{ name: "生源地", value: "浙江" }] },
+    })
+  );
+  assert.notEqual(saltedKey, legacyKey);
+
+  const renamedKey = helpers.createMappingCacheKeyFromSignature(
+    signature,
+    helpers.buildCustomFieldsCacheSalt({
+      personal: { customFields: [{ name: "政治面貌", value: "中共党员" }] },
+    })
+  );
+  assert.notEqual(renamedKey, saltedKey);
+
+  const otherSectionKey = helpers.createMappingCacheKeyFromSignature(
+    signature,
+    helpers.buildCustomFieldsCacheSalt({
+      additional: { customFields: [{ name: "生源地", value: "浙江" }] },
+    })
+  );
+  assert.notEqual(otherSectionKey, saltedKey);
 });

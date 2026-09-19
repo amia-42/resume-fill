@@ -91,6 +91,68 @@ test("resume schema normalizes campus recruiting resume data", () => {
   assert.equal(normalized.campusExperiences[0].isCurrent, "是");
 });
 
+test("resume schema supports user-defined custom fields inside group sections", () => {
+  const schema = loadResumeSchema();
+  const normalized = schema.normalizeResumeProfile({
+    personal: {
+      fullName: "张三",
+      customFields: [
+        { name: "生源地", value: "浙江杭州" },
+        { name: " 政治面貌 ", value: 1 },
+        { name: "", value: "" },
+      ],
+      unknownKey: "dropped",
+    },
+  });
+
+  assert.equal(Array.isArray(normalized.personal.customFields), true);
+  assert.equal(normalized.personal.customFields.length, 2);
+  assert.equal(normalized.personal.customFields[0].name, "生源地");
+  assert.equal(normalized.personal.customFields[0].value, "浙江杭州");
+  assert.equal(normalized.personal.customFields[1].name, "政治面貌");
+  assert.equal(normalized.personal.customFields[1].value, "1");
+  assert.equal("unknownKey" in normalized.personal, false);
+  assert.equal(Array.isArray(normalized.skills.customFields), true);
+
+  const maxCatalog = schema.getFieldCatalog({ mode: "max" });
+  assert.ok(
+    maxCatalog.some((field) => field.path === "personal.customFields.0.value")
+  );
+  assert.ok(
+    !maxCatalog.some((field) => field.path === "personal.customFields.0.name")
+  );
+  assert.ok(
+    maxCatalog.some((field) => field.path === "skills.customFields.11.value")
+  );
+
+  const withValues = schema.getCatalogWithValues(normalized);
+  const customEntry = withValues.find(
+    (field) => field.path === "personal.customFields.0.value"
+  );
+  assert.equal(customEntry.label, "生源地");
+  assert.equal(customEntry.sectionLabel, "基本信息");
+  assert.equal(customEntry.value, "浙江杭州");
+  assert.equal(customEntry.hasValue, true);
+  assert.equal(
+    withValues.some(
+      (field) =>
+        field.path.includes("customFields.") && field.path.endsWith(".name")
+    ),
+    false
+  );
+
+  assert.equal(
+    schema.hasAnyFilledField({
+      personal: { customFields: [{ name: "生源地", value: "浙江" }] },
+    }),
+    true
+  );
+
+  const importTemplate = JSON.parse(schema.createImportTemplateString());
+  assert.equal("customFields" in importTemplate, false);
+  assert.equal("customFields" in importTemplate.personal, false);
+});
+
 test("resume schema preserves flexible date precision and legacy aliases", () => {
   const schema = loadResumeSchema();
   const normalized = schema.normalizeResumeProfile({

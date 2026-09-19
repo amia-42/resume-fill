@@ -77,6 +77,7 @@ async function callAI(modelId, prompt, mode) {
 2) 当多个候选语义接近时，优先选择 sectionLabel / itemLabel 更一致、且 hasValue=true 的 resumePath
 3) 对同一区块内重复出现的“起止时间”字段，通常前一个映射开始时间，后一个映射结束时间
 4) 如果 field.label 为空但 sectionLabel / nearbyLabels 不为空，必须充分利用这些扫描线索，不要把它当成完全无信息字段
+5) resumeFields 中可能包含用户在各区块内手动添加的自定义字段：path 形如 <sectionKey>.customFields.N.value，label 就是用户命名的字段名，sectionLabel 为其所在区块；当页面字段与该名称语义一致（且区块一致更佳）时，映射到对应的 customFields 路径
 
 校招场景优先级：
 1) 含“实习”“实习经历”“实习公司”“实习岗位”等语义时，优先映射到 internships.*，不要优先映射到 workExperiences.*

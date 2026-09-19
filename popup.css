@@ -1201,3 +1201,42 @@ body {
   font-size: 12px;
   white-space: nowrap;
 }
+
+/* ─── Section Custom Fields ───────────────────────────────────────────────── */
+.resume-custom-fields {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+
+.resume-custom-fields-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.resume-custom-fields-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.resume-custom-fields-hint {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-light);
+}
+
+.resume-custom-field-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto;
+  gap: 10px;
+  align-items: end;
+  margin-top: 10px;
+}
+
+.resume-custom-field-remove {
+  flex-shrink: 0;
+  padding: 0 0 10px;
+}
