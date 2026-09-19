@@ -364,7 +364,7 @@
   async function exportTemplateData(storageOverride) {
     const state = await loadTemplateState(storageOverride);
     return {
-      app: "ai-resume-form-filling-assistant",
+      app: "my-resume-fill",
       kind: "resume-templates",
       version: 1,
       exportedAt: nowIso(),
@@ -430,7 +430,7 @@
       (template) => template.id === state.activeTemplateId
     );
     return {
-      app: "ai-resume-form-filling-assistant",
+      app: "my-resume-fill",
       kind: "resume-profile",
       version: 1,
       exportedAt: nowIso(),
