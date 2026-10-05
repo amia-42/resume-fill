@@ -57,6 +57,10 @@
     'h1,h2,h3,h4,h5,h6,[role="heading"],[class*="section"],[class*="Section"],[class*="header"],[class*="Header"],[class*="title"],[class*="Title"],legend';
   const STRUCTURAL_CONTAINER_SELECTOR =
     '[class*="form"],[class*="Form"],[class*="field"],[class*="Field"],[class*="item"],[class*="Item"],[class*="row"],[class*="Row"],[class*="group"],[class*="Group"],[class*="cell"],[class*="Cell"],fieldset,section,article,tr,li,td,th,dl';
+  const CUSTOM_DROPDOWN_CONTROL_SELECTOR =
+    '[role="combobox"],[aria-haspopup="listbox"]';
+  const CUSTOM_DROPDOWN_OPTION_SELECTOR =
+    '[role="option"],li,[class*="option"],[class*="Option"],[class*="dropdown__item"],[class*="DropdownItem"],[class*="menu-item"],[class*="MenuItem"],[data-value],[data-option-value]';
   const SELECTION_OVERLAY_ID = "ai-resume-fill-selection-overlay";
   const SELECTION_BOX_ID = "ai-resume-fill-selection-box";
   const SELECTION_HINT_ID = "ai-resume-fill-selection-hint";
@@ -927,6 +931,147 @@
     };
   }
 
+  function hasCustomDropdownClassHint(el) {
+    const className = String(el?.className || "");
+    const identity = [
+      className,
+      el?.id,
+      el?.getAttribute?.("name"),
+      el?.getAttribute?.("data-testid"),
+      el?.getAttribute?.("data-test-id"),
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    return /(^|[\s_-])(select|dropdown|combobox|autocomplete)([\s_-]|$)/i.test(
+      identity
+    );
+  }
+
+  function findCustomDropdownRoot(el) {
+    if (!el) return null;
+
+    const explicitRoot = el.closest?.(CUSTOM_DROPDOWN_CONTROL_SELECTOR);
+    if (explicitRoot) return explicitRoot;
+
+    let current = el;
+    let matched = null;
+    for (let depth = 0; current && depth < 4; depth += 1) {
+      if (hasCustomDropdownClassHint(current)) {
+        matched = current;
+      }
+      current = current.parentElement;
+    }
+
+    return matched || el;
+  }
+
+  function isCustomDropdownElement(el, semanticMeta = null) {
+    if (!el || el.tagName?.toLowerCase?.() === "select") return false;
+
+    const tagName = el.tagName?.toLowerCase?.() || "";
+    const role = String(el.getAttribute?.("role") || "").toLowerCase();
+    const popupRole = String(el.getAttribute?.("aria-haspopup") || "").toLowerCase();
+    const hasClassHintOnElement = hasCustomDropdownClassHint(el);
+    const hasExplicitSemantics =
+      role === "combobox" ||
+      popupRole === "listbox" ||
+      (el.hasAttribute?.("aria-expanded") &&
+        Boolean(el.getAttribute?.("aria-controls") || el.getAttribute?.("aria-owns")) &&
+        hasClassHintOnElement);
+
+    const root = findCustomDropdownRoot(el);
+    const hasClassHint =
+      hasClassHintOnElement ||
+      (root && root !== el && hasCustomDropdownClassHint(root));
+    const isReadonlyInput =
+      tagName === "input" &&
+      Boolean(el.readOnly || el.getAttribute?.("aria-readonly") === "true");
+    const semanticText = [
+      semanticMeta?.label,
+      semanticMeta?.context,
+      semanticMeta?.sectionLabel,
+      el.getAttribute?.("placeholder"),
+      el.getAttribute?.("name"),
+      root?.className,
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const looksLikeDate = /(日期|出生|年月|入学|毕业|时间|calendar|datepicker|date-picker)/i.test(
+      semanticText
+    );
+
+    if (looksLikeDate && popupRole !== "listbox" && !hasClassHint) return false;
+    return hasExplicitSemantics || (isReadonlyInput && hasClassHint);
+  }
+
+  function resolveCustomDropdownControl(el) {
+    if (!el) return null;
+    if (el.tagName?.toLowerCase?.() === "input") return el;
+
+    const nestedInput = el.querySelector?.(
+      'input:not([type="hidden"]),[contenteditable="true"],[contenteditable=""]'
+    );
+    return nestedInput || el;
+  }
+
+  function getCustomDropdownOptionLabel(option) {
+    if (!option) return "";
+    return normalizeText(
+      option.getAttribute?.("aria-label") ||
+        option.getAttribute?.("data-label") ||
+        option.textContent ||
+        ""
+    );
+  }
+
+  function collectDeclaredComboboxOptions(el) {
+    const root = findCustomDropdownRoot(el);
+    const ids = [
+      root?.getAttribute?.("aria-controls"),
+      root?.getAttribute?.("aria-owns"),
+      el?.getAttribute?.("aria-controls"),
+      el?.getAttribute?.("aria-owns"),
+    ]
+      .filter(Boolean)
+      .flatMap((value) => String(value).split(/\s+/g));
+
+    const labels = [];
+    for (const id of ids) {
+      const target = document.getElementById?.(id.replace(/^#/, ""));
+      if (!target) continue;
+      for (const option of Array.from(
+        target.querySelectorAll?.(CUSTOM_DROPDOWN_OPTION_SELECTOR) || []
+      )) {
+        if (!isVisible(option)) continue;
+        const label = getCustomDropdownOptionLabel(option);
+        if (label && !labels.includes(label)) labels.push(label);
+      }
+    }
+
+    return labels.slice(0, 60);
+  }
+
+  function buildCustomDropdownRuntime(fieldId, el, semanticMeta) {
+    const root = findCustomDropdownRoot(el);
+    const tagName = el?.tagName?.toLowerCase?.() || "";
+    const trigger =
+      tagName === "input" || el?.getAttribute?.("contenteditable") != null
+        ? el
+        : root || el;
+    return {
+      fieldId,
+      kind: "combobox",
+      el,
+      trigger,
+      root: root || el,
+      label: semanticMeta?.label || "",
+      placeholder: el.getAttribute?.("placeholder") || "",
+      context: semanticMeta?.context || "",
+      nearbyLabels: semanticMeta?.nearbyLabels || [],
+    };
+  }
+
   function scanFields({ scope = "page", selectionRect = null } = {}) {
     const root = scope === "selection" ? document : pickLikelyFormRoot();
     const elements = collectControls(root);
@@ -937,6 +1082,7 @@
     let idSeq = 0;
     const radioGroups = new Map();
     const checkboxGroups = new Map();
+    const scannedCustomDropdownRoots = new WeakSet();
 
     for (const el of elements) {
       if (!isFillableElement(el)) continue;
@@ -957,6 +1103,28 @@
         sectionEvidence: semanticMeta.sectionEvidence,
         nearbyLabels: semanticMeta.nearbyLabels,
       };
+
+      if (tag !== "select" && isCustomDropdownElement(el, semanticMeta)) {
+        const root = findCustomDropdownRoot(el) || el;
+        if (scannedCustomDropdownRoots.has(root)) continue;
+        scannedCustomDropdownRoots.add(root);
+
+        const control = resolveCustomDropdownControl(el) || el;
+        const fieldId = `f_${++idSeq}`;
+        fields.push({
+          fieldId,
+          kind: "select",
+          label: semanticMeta.label,
+          name: control.getAttribute?.("name") || el.getAttribute?.("name") || "",
+          id: control.id || el.id || "",
+          placeholder: control.getAttribute?.("placeholder") || "",
+          options: collectDeclaredComboboxOptions(control),
+          ...commonMeta,
+        });
+
+        runtime.push(buildCustomDropdownRuntime(fieldId, control, semanticMeta));
+        continue;
+      }
 
       if (tag === "select") {
         const fieldId = `f_${++idSeq}`;
@@ -1292,7 +1460,7 @@
   function collectControls(root) {
     const scope = root || document;
     const selectors =
-      'input, textarea, select, [contenteditable="true"], [contenteditable=""]';
+      `input, textarea, select, [contenteditable="true"], [contenteditable=""], ${CUSTOM_DROPDOWN_CONTROL_SELECTOR}`;
 
     return Array.from(scope.querySelectorAll(selectors)).filter((el) => isVisible(el));
   }
@@ -1647,6 +1815,12 @@
       return true;
     }
 
+    if (runtime.kind === "combobox") {
+      return getCustomDropdownCurrentTexts(runtime).some(
+        (text) => text && text !== String(runtime.placeholder || "").trim()
+      );
+    }
+
     if (runtime.kind === "contenteditable") {
       return Boolean(String(runtime.el?.textContent || "").trim());
     }
@@ -1697,8 +1871,15 @@
     }
 
     if (runtime.kind === "select") {
-      const ok = selectByText(runtime.el, value);
+      const ok = await selectByText(runtime.el, value);
       return ok ? { filled: true } : { filled: false, message: "未找到可匹配的下拉选项" };
+    }
+
+    if (runtime.kind === "combobox") {
+      const ok = await selectCustomDropdownOption(runtime, value);
+      return ok
+        ? { filled: true }
+        : { filled: false, message: "未找到或未能选中匹配的自定义下拉选项" };
     }
 
     if (runtime.kind === "contenteditable") {
@@ -2143,10 +2324,19 @@
       return;
     }
 
+    if (tag === "select") {
+      const setter =
+        typeof HTMLSelectElement !== "undefined"
+          ? Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set
+          : null;
+      setter ? setter.call(element, value) : (element.value = value);
+      return;
+    }
+
     element.value = value;
   }
 
-  function selectByText(selectEl, desired) {
+  async function selectByText(selectEl, desired) {
     if (!selectEl?.options) return false;
 
     scrollIntoView(selectEl);
@@ -2161,10 +2351,215 @@
     const best = pickBestOption(options, desired);
     if (!best) return false;
 
-    selectEl.value = best.value;
-    selectEl.dispatchEvent(new Event("change", { bubbles: true }));
+    setNativeValue(selectEl, best.value);
     selectEl.dispatchEvent(new Event("input", { bubbles: true }));
-    return true;
+    selectEl.dispatchEvent(new Event("change", { bubbles: true }));
+    await sleep(60);
+    return String(selectEl.value ?? "") === String(best.value ?? "");
+  }
+
+  function getCustomDropdownCurrentTexts(runtime) {
+    const values = [];
+    const add = (value) => {
+      const text = normalizeText(value);
+      if (text && !values.includes(text)) values.push(text);
+    };
+
+    const control = runtime?.el;
+    const root = runtime?.root || runtime?.trigger || control;
+    add(control?.value);
+    add(control?.getAttribute?.("aria-valuetext"));
+    add(control?.getAttribute?.("data-value"));
+    if (control?.tagName?.toLowerCase?.() !== "input") {
+      add(control?.textContent);
+    }
+
+    if (root && root !== control) {
+      const selected = root.querySelector?.(
+        '[aria-selected="true"],[class*="selected"],[class*="Selected"],[class*="value"],[class*="Value"]'
+      );
+      add(selected?.textContent);
+    }
+
+    return values;
+  }
+
+  function getCustomDropdownPopupRoots(runtime) {
+    const roots = [];
+    const seen = new Set();
+    const addRoot = (root) => {
+      if (!root || seen.has(root)) return;
+      seen.add(root);
+      roots.push(root);
+    };
+
+    const control = runtime?.el;
+    const trigger = runtime?.trigger || control;
+    const ids = [
+      control?.getAttribute?.("aria-controls"),
+      control?.getAttribute?.("aria-owns"),
+      trigger?.getAttribute?.("aria-controls"),
+      trigger?.getAttribute?.("aria-owns"),
+    ]
+      .filter(Boolean)
+      .flatMap((value) => String(value).split(/\s+/g));
+
+    for (const id of ids) {
+      addRoot(document.getElementById?.(id.replace(/^#/, "")));
+    }
+
+    const root = runtime?.root;
+    if (root?.matches?.('[role="listbox"]')) addRoot(root);
+
+    const candidates = Array.from(
+      document.querySelectorAll?.(
+        '[role="listbox"],[class*="dropdown"],[class*="Dropdown"],[class*="select-menu"],[class*="SelectMenu"],[class*="menu"] ,[class*="Menu"]'
+      ) || []
+    ).filter((node) => isVisible(node));
+
+    const triggerRect = trigger?.getBoundingClientRect?.();
+    candidates
+      .map((node) => {
+        const rect = node.getBoundingClientRect?.();
+        const distance =
+          triggerRect && rect
+            ? Math.abs(Number(rect.left || 0) - Number(triggerRect.left || 0)) +
+              Math.abs(Number(rect.top || 0) - Number(triggerRect.bottom || 0))
+            : Number.MAX_SAFE_INTEGER;
+        return { node, distance };
+      })
+      .sort((left, right) => left.distance - right.distance)
+      .slice(0, 8)
+      .forEach(({ node }) => addRoot(node));
+
+    if (root && root !== trigger) addRoot(root);
+    return roots;
+  }
+
+  function collectVisibleCustomDropdownOptions(runtime) {
+    const options = [];
+    const seenElements = new Set();
+    const seenLabels = new Set();
+
+    for (const popupRoot of getCustomDropdownPopupRoots(runtime)) {
+      const nodes = [];
+      if (popupRoot.matches?.(CUSTOM_DROPDOWN_OPTION_SELECTOR)) {
+        nodes.push(popupRoot);
+      }
+      nodes.push(
+        ...Array.from(
+          popupRoot.querySelectorAll?.(CUSTOM_DROPDOWN_OPTION_SELECTOR) || []
+        )
+      );
+
+      for (const node of nodes) {
+        if (seenElements.has(node) || !isVisible(node)) continue;
+        if (
+          node.getAttribute?.("aria-disabled") === "true" ||
+          /(^|[\s_-])disabled([\s_-]|$)/i.test(String(node.className || ""))
+        ) {
+          continue;
+        }
+        const label = getCustomDropdownOptionLabel(node);
+        if (!label || seenLabels.has(label)) continue;
+
+        const nestedOption = node.querySelector?.(
+          '[role="option"],[class*="option"],[class*="Option"]'
+        );
+        if (nestedOption && isVisible(nestedOption)) continue;
+
+        seenElements.add(node);
+        seenLabels.add(label);
+        options.push({
+          el: node,
+          label,
+          value:
+            node.getAttribute?.("data-value") ||
+            node.getAttribute?.("data-option-value") ||
+            node.getAttribute?.("value") ||
+            label,
+        });
+      }
+    }
+
+    return options.slice(0, 100);
+  }
+
+  async function waitForCustomDropdownOptions(runtime, timeoutMs = 900) {
+    const start = Date.now();
+    let options = collectVisibleCustomDropdownOptions(runtime);
+    while (options.length === 0 && Date.now() - start < timeoutMs) {
+      await sleep(60);
+      options = collectVisibleCustomDropdownOptions(runtime);
+    }
+    return options;
+  }
+
+  function customDropdownSelectionLooksCommitted(runtime, desired, option) {
+    const desiredCandidates = Array.isArray(desired) ? desired : [desired];
+    if (getCustomDropdownCurrentTexts(runtime).some((current) =>
+      desiredCandidates.some((candidate) => getMatchScore(current, candidate) >= 60)
+    )) {
+      return true;
+    }
+
+    const optionClass = String(option?.el?.className || "");
+    if (
+      option?.el?.getAttribute?.("aria-selected") === "true" ||
+      /(^|[\s_-])(selected|active)([\s_-]|$)/i.test(optionClass)
+    ) {
+      return true;
+    }
+
+    return !isVisible(option?.el);
+  }
+
+  async function selectCustomDropdownOption(runtime, desired) {
+    const text = Array.isArray(desired)
+      ? desired.map((item) => String(item || "").trim()).filter(Boolean)[0] || ""
+      : String(desired ?? "").trim();
+    if (!text) return false;
+
+    let options = collectVisibleCustomDropdownOptions(runtime);
+    let best = pickBestOption(options, text);
+
+    if (!best) {
+      clickLikeUser(runtime?.trigger || runtime?.el);
+      options = await waitForCustomDropdownOptions(runtime);
+      best = pickBestOption(options, text);
+    }
+
+    const isExpanded = [runtime?.el, runtime?.trigger, runtime?.root].some(
+      (element) => element?.getAttribute?.("aria-expanded") === "true"
+    );
+    if (
+      !best &&
+      !isExpanded &&
+      runtime?.root &&
+      runtime.root !== runtime.trigger
+    ) {
+      clickLikeUser(runtime.root);
+      options = await waitForCustomDropdownOptions(runtime);
+      best = pickBestOption(options, text);
+    }
+
+    if (!best && runtime?.el?.tagName?.toLowerCase?.() === "input" && !runtime.el.readOnly) {
+      const previousValue = String(runtime.el.value || "");
+      setNativeValue(runtime.el, text);
+      runtime.el.dispatchEvent(new Event("input", { bubbles: true }));
+      options = await waitForCustomDropdownOptions(runtime);
+      best = pickBestOption(options, text);
+      if (!best) {
+        setNativeValue(runtime.el, previousValue);
+        runtime.el.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    }
+
+    if (!best) return false;
+
+    clickLikeUser(best.el);
+    await sleep(120);
+    return customDropdownSelectionLooksCommitted(runtime, text, best);
   }
 
   async function safeCheck(inputEl, checked) {
