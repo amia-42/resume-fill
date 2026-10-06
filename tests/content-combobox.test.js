@@ -69,7 +69,7 @@ test("custom combobox semantics are detected separately from native text fields"
 
   assert.equal(
     helpers.isCustomDropdownElement(
-      createElement({ className: "el-select__input", readOnly: true }),
+      createElement({ className: "sd-Input-input-10L0t sd-Select-container-1Eq4x" }),
       { label: "最高学历" }
     ),
     true
@@ -100,4 +100,14 @@ test("custom dropdown runtime keeps the trigger and selected control", () => {
   assert.equal(runtime.kind, "combobox");
   assert.equal(runtime.el, input);
   assert.equal(runtime.trigger, input);
+});
+
+test("supports the sd dropdown option classes used by school selectors", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "../content.js"),
+    "utf8"
+  );
+
+  assert.match(source, /Select-common-item/);
+  assert.match(source, /class\*="dropdown"/);
 });
