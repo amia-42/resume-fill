@@ -12,10 +12,42 @@
     "use strict";
 
     const SECTION_RULES = [
+      // These page-only groups intentionally do not imply a matching resume
+      // schema section.  A concrete group title must win over generic labels
+      // such as “姓名” and “电话”, otherwise family rows are often mapped to
+      // the applicant's own contact details.
+      {
+        key: "family",
+        label: "家庭情况",
+        keywords: [
+          "家庭情况",
+          "家庭成员",
+          "家庭信息",
+          "家庭关系",
+          "家属信息",
+          "家庭主要成员",
+          "直系亲属",
+          "父母信息",
+          "亲属信息",
+        ],
+        priority: 40,
+      },
+      {
+        key: "emergencyContact",
+        label: "紧急联系人",
+        keywords: [
+          "紧急联系人",
+          "紧急联络人",
+          "应急联系人",
+          "紧急联系信息",
+        ],
+        priority: 38,
+      },
       {
         key: "personal",
         label: "基本信息",
         keywords: ["基本信息", "个人信息", "联系方式", "姓名", "邮箱", "手机", "电话", "证件"],
+        priority: 0,
       },
       {
         key: "education",
@@ -40,6 +72,7 @@
           "论文",
           "gpa",
         ],
+        priority: 0,
       },
       {
         key: "internship",
@@ -53,6 +86,7 @@
           "实习城市",
           "实习生",
         ],
+        priority: 0,
       },
       {
         key: "work",
@@ -66,11 +100,13 @@
           "工作职责",
           "工作成绩",
         ],
+        priority: 0,
       },
       {
         key: "project",
         label: "项目经历",
         keywords: ["项目经历", "项目名称", "项目角色", "项目链接", "项目说明", "项目亮点", "项目描述"],
+        priority: 0,
       },
       {
         key: "campus",
@@ -85,16 +121,19 @@
           "科研助理",
           "组织名称",
         ],
+        priority: 0,
       },
       {
         key: "certificate",
         label: "证书与认证",
         keywords: ["证书", "认证", "发证", "等级考试", "资格证"],
+        priority: 0,
       },
       {
         key: "language",
         label: "语言能力",
         keywords: ["语言能力", "语言", "外语", "雅思", "托福", "cet", "四六级"],
+        priority: 0,
       },
     ];
 
@@ -152,12 +191,18 @@
           score += 5;
         }
 
-        if (score > best.score) {
+        // A specific group heading (family/emergency contact) outranks a
+        // generic field label even when the latter appears more often in the
+        // nearby text.  The small tie-breaker keeps unrelated page headings
+        // from becoming a section by themselves.
+        if (score <= 0) continue;
+        const weightedScore = score + (rule.priority || 0);
+        if (weightedScore > best.score) {
           best = {
             key: rule.key,
             label: rule.label,
             evidence: Array.from(new Set(matched)).slice(0, 3).join(" / "),
-            score,
+            score: weightedScore,
           };
         }
       }
@@ -174,8 +219,67 @@
       return best;
     }
 
+    // Infer only a concrete, page-level field group.  Generic labels such as
+    // “姓名” and “电话” intentionally return no group: callers can still use
+    // inferSectionFromTexts for their broad section hint, while a group title
+    // (or a strong family/emergency marker) remains the source of truth for
+    // repeated rows.
+    function inferGroupFromTexts(texts) {
+      const list = Array.isArray(texts) ? texts.filter(Boolean) : [];
+      const normalized = list.map(normalizeSemanticText).filter(Boolean);
+      if (normalized.length === 0) {
+        return { key: "", label: "", evidence: "", score: 0 };
+      }
+
+      const groupRules = [
+        {
+          key: "family",
+          label: "家庭情况",
+          keywords: [
+            "家庭情况",
+            "家庭成员",
+            "家庭信息",
+            "家庭关系",
+            "家庭主要成员",
+            "直系亲属",
+            "父母信息",
+            "亲属信息",
+          ],
+        },
+        {
+          key: "emergencyContact",
+          label: "紧急联系人",
+          keywords: ["紧急联系人", "紧急联络人", "应急联系人", "紧急联系信息"],
+        },
+      ];
+
+      let best = { key: "", label: "", evidence: "", score: 0 };
+      for (const rule of groupRules) {
+        let score = 0;
+        const matched = [];
+        for (const value of normalized) {
+          for (const keyword of rule.keywords) {
+            const normalizedKeyword = normalizeSemanticText(keyword);
+            if (!normalizedKeyword || !value.includes(normalizedKeyword)) continue;
+            score += value === normalizedKeyword ? 8 : 4;
+            matched.push(keyword);
+          }
+        }
+        if (score > best.score) {
+          best = {
+            key: rule.key,
+            label: rule.label,
+            evidence: Array.from(new Set(matched)).slice(0, 3).join(" / "),
+            score,
+          };
+        }
+      }
+      return best.score >= 4 ? best : { key: "", label: "", evidence: "", score: 0 };
+    }
+
     return {
       inferSectionFromTexts,
+      inferGroupFromTexts,
       normalizeSemanticText,
     };
   }

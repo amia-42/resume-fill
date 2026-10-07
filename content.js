@@ -47,6 +47,49 @@
     return;
   }
 
+  // This catalogue is also rendered in settings. Keep a fallback so an older
+  // injected page can still use ordinary filling after an extension reload.
+  const controlCapabilities = window.ResumeControlCapabilities || {
+    getAll: () => [
+      { kind: "text", label: "文本输入", inputTypes: ["text", "email", "tel", "url", "number", "date", "month", "time", "datetime-local"] },
+      { kind: "textarea", label: "多行文本", inputTypes: ["textarea"] },
+      { kind: "select", label: "原生下拉框", inputTypes: ["select"] },
+      {
+        kind: "combobox",
+        label: "自定义下拉框（北森 / 前程无忧 / 国聘等）",
+        inputTypes: [
+          "combobox",
+          "role=combobox",
+          "aria-haspopup=listbox",
+          "el-select",
+          "layui-form-select",
+          "chosen",
+          "select2",
+          "ant-select",
+          "ivu-select",
+          "select-box",
+          "drop-menu",
+        ],
+      },
+      { kind: "readonly_date", label: "只读日期 / 日期面板", inputTypes: ["readonly-date", "date-picker"] },
+      { kind: "radio_group", label: "单选组", inputTypes: ["radio"] },
+      { kind: "checkbox_group", label: "多选组", inputTypes: ["checkbox"] },
+      { kind: "contenteditable", label: "可编辑区域", inputTypes: ["contenteditable"] },
+      { kind: "file", label: "文件上传（暂不自动填写）", inputTypes: ["file"], supported: false },
+    ],
+    isSupported: (kind) => !["file", "", "unknown"].includes(String(kind || "")),
+    normalizeKind: (kind) => String(kind || "").trim().toLowerCase(),
+  };
+
+  // Field groups are page-structure metadata. Keep a graceful fallback so a
+  // page that still has an older injected script can continue to fill fields;
+  // the current injector loads shared/field-groups.js before this file.
+  const fieldGroups = window.ResumeFieldGroups || {
+    enrichFields(fields) {
+      return { fields: Array.isArray(fields) ? fields : [], groups: [] };
+    },
+  };
+
   const EXT_TAG = "[简历填表助手]";
   const MAPPING_CACHE_KEY = "fieldMappingCacheV3";
   const CONTROL_SELECTOR =
@@ -57,6 +100,26 @@
     'h1,h2,h3,h4,h5,h6,[role="heading"],[class*="section"],[class*="Section"],[class*="header"],[class*="Header"],[class*="title"],[class*="Title"],legend';
   const STRUCTURAL_CONTAINER_SELECTOR =
     '[class*="form"],[class*="Form"],[class*="field"],[class*="Field"],[class*="item"],[class*="Item"],[class*="row"],[class*="Row"],[class*="group"],[class*="Group"],[class*="cell"],[class*="Cell"],fieldset,section,article,tr,li,td,th,dl';
+  const CUSTOM_DROPDOWN_CONTROL_SELECTOR =
+    '[role="combobox"],[aria-haspopup="listbox"]';
+  // Many UI libraries hide the native <select> and expose a visible wrapper
+  // or readonly input instead. Include those hosts in the scan so the
+  // wrapper can be filled through its popup options.
+  const CUSTOM_DROPDOWN_HOST_SELECTOR = [
+    CUSTOM_DROPDOWN_CONTROL_SELECTOR,
+    '.el-select,.el-cascader,.el-tree-select,.el-autocomplete,.ant-select,.ant-cascader,.ant-tree-select,.ivu-select',
+    '.layui-form-select,.layui-select',
+    '.chosen-container,.chosen-single,.chosen-choices',
+    '.select2-container,.select2-selection',
+    '[class*="select-box"],[class*="select_box"],[class*="selectbox"],[class*="selectBox"],[class*="SelectBox"],[class*="drop-menu"],[class*="drop_menu"],[class*="dropmenu"],[class*="DropMenu"],[class*="bootstrap-select"],[class*="bs-select"]',
+    '[class*="dropdown-select"],[class*="DropdownSelect"]',
+    'input[readonly][aria-controls],input[readonly][aria-owns]',
+    'input[aria-expanded][aria-controls],input[aria-expanded][aria-owns]',
+    '[aria-expanded][aria-controls],[aria-expanded][aria-owns]',
+    '[aria-autocomplete="list"],[aria-autocomplete="both"]',
+  ].join(',');
+  const CUSTOM_DROPDOWN_OPTION_SELECTOR =
+    '[role="option"],li,dd[lay-value],[class*="option"],[class*="Option"],[class*="dropdown__item"],[class*="DropdownItem"],[class*="menu-item"],[class*="MenuItem"],[class*="Select-common-item"],[class*="select-common-item"],[class*="Menu-container"],[class*="Menu-content-item"],[class*="active-result"],[class*="cascader-node"],[class*="tree-treenode"],[class*="tree-node"],[class*="ivu-select-item"],[class*="ant-select-item-option"],[class*="select2-results__option"],[data-value],[data-option-value],[data-option-array-index],[data-select2-id]';
   const SELECTION_OVERLAY_ID = "ai-resume-fill-selection-overlay";
   const SELECTION_BOX_ID = "ai-resume-fill-selection-box";
   const SELECTION_HINT_ID = "ai-resume-fill-selection-hint";
@@ -145,9 +208,19 @@
     }
 
     if (action === "startFill") {
-    handleStartFill(message.modelId, message.resumeProfile, {
+      handleStartFill(message.modelId, message.resumeProfile, {
         fillMode: message.fillMode,
         scope: message.scope,
+        adaptive: message.adaptive === true,
+        adaptiveScope: message.adaptiveScope,
+        overwriteExisting: message.overwriteExisting,
+        // Preserve an omitted value so older popups can still use the
+        // persisted setting. An explicit false always disables the fallback.
+        dangerMode: typeof message.dangerMode === "boolean"
+          ? message.dangerMode
+          : typeof message.dangerousMode === "boolean"
+            ? message.dangerousMode
+            : undefined,
       })
         .then((result) => sendResponse(result))
         .catch((error) =>
@@ -169,8 +242,28 @@
         throw new Error("标准简历为空：请先在侧边栏填写或导入标准简历");
       }
 
-      const fillMode = request?.fillMode === "incremental" ? "incremental" : "overwrite";
-      const scope = request?.scope === "selection" ? "selection" : "page";
+      // Load successful adapter registrations before building the AI payload.
+      // This keeps the page-side capability list in sync with the settings UI.
+      await controlCapabilities.loadPersisted?.();
+
+      const adaptive = request?.adaptive === true || request?.fillMode === "adaptive";
+      const dangerMode = await resolveDangerMode(request);
+      // Adaptive filling has two explicit scopes. The overwrite choice is
+      // independent so users can run either scope incrementally or replace
+      // values deliberately.
+      const scope = adaptive
+        ? request?.adaptiveScope === "page" || request?.scope === "page"
+          ? "page"
+          : "selection"
+        : request?.scope === "selection"
+          ? "selection"
+          : "page";
+      const overwriteExisting = request?.overwriteExisting !== false;
+      const fillMode = request?.fillMode === "incremental"
+        ? "incremental"
+        : adaptive
+          ? overwriteExisting ? "overwrite" : "incremental"
+          : "overwrite";
       let selectionRect = null;
 
       if (scope === "selection") {
@@ -200,7 +293,45 @@
         "info",
         scope === "selection" ? "开始扫描选区内表单字段..." : "开始扫描当前页面表单字段..."
       );
-      const scan = scanFields({ scope, selectionRect });
+      const rawScan = scanFields({
+        scope,
+        selectionRect,
+        // Adaptive page mode intentionally considers every document control,
+        // while the legacy page mapper keeps its likely-form-root heuristic.
+        fullPage: adaptive && scope === "page",
+      });
+      let groupedScan;
+      try {
+        groupedScan = fieldGroups.enrichFields?.(
+          rawScan.fields,
+          rawScan.runtime
+        ) || { fields: rawScan.fields, groups: [] };
+      } catch (error) {
+        sendLog("warning", `字段组识别失败，将继续使用未分组字段：${error?.message || String(error)}`);
+        groupedScan = { fields: rawScan.fields, groups: [] };
+      }
+      const groupedFields = Array.isArray(groupedScan.fields)
+        ? groupedScan.fields
+        : rawScan.fields;
+      const groupedGroups = Array.isArray(groupedScan.groups)
+        ? groupedScan.groups
+        : [];
+      // The payload builders intentionally keep their historical two-argument
+      // signatures for test and integration compatibility. A non-enumerable
+      // side channel carries the structural groups without leaking DOM data.
+      try {
+        Object.defineProperty(groupedFields, "__groups", {
+          value: groupedGroups,
+          configurable: true,
+        });
+      } catch (_) {
+        // Frozen arrays are still usable; fields retain their group metadata.
+      }
+      const scan = {
+        ...rawScan,
+        fields: groupedFields,
+        groups: groupedGroups,
+      };
 
       lastFieldCount = scan.fields.length;
       lastMappedCount = 0;
@@ -234,42 +365,76 @@
       );
       let mappings = null;
       let cacheHit = false;
+      let adaptiveDecisions = new Map();
 
-      const cacheLookup = await loadMappingCacheEntry(cacheKey, {
-        host: location.host,
-        path: location.pathname,
-        signature: cacheSignature,
-      });
-      const cachedEntry = cacheLookup.entry;
-      if (cachedEntry?.mappings?.length) {
-        mappings = normalizeMappings(cachedEntry.mappings, scan.fields);
-        cacheHit = true;
-        sendLog("info", "已命中本地字段映射缓存，跳过模型调用。");
-      } else {
-        sendLog("info", `[缓存] 未命中 reason="${cacheLookup.reason || "未知原因"}"`);
+      if (adaptive) {
         sendLog(
           "info",
-          `已识别 ${lastFieldCount} 个字段，正在调用 AI 建立字段映射...`
+          `自适应${scope === "selection" ? "选区" : "整页"}模式：正在读取控件源码并让 AI 决定填入策略...`
         );
-
-        const promptPayload = buildFieldMappingPayload(scan.fields, resumeProfile);
+        const promptPayload = buildAdaptiveFillPayload(scan.fields, resumeProfile, {
+          scope,
+          overwriteExisting,
+          groups: scan.groups,
+        });
         const aiText = await aiClient.callAI(
           modelId,
           JSON.stringify(promptPayload),
-          "field_mapping"
+          "adaptive_fill"
         );
         const parsed = parseJsonFromAiText(aiText);
-        mappings = normalizeMappings(parsed?.mappings, scan.fields);
-
-        await saveMappingCacheEntry(cacheKey, {
-          updatedAt: Date.now(),
-          mappings,
+        const normalized = normalizeAdaptiveDecisions(
+          parsed?.decisions,
+          scan.fields,
+          resumeProfile
+        );
+        adaptiveDecisions = new Map(normalized.map((item) => [item.fieldId, item]));
+        mappings = normalized
+          .filter((item) => item.shouldFill && item.resumePath)
+          .map((item) => ({
+            fieldId: item.fieldId,
+            resumePath: item.resumePath,
+            reason: item.reason,
+            transform: item.transform,
+          }));
+        sendLog("success", `自适应决策已生成：允许填入 ${mappings.length}/${scan.fields.length} 个字段。`);
+      } else {
+        const cacheLookup = await loadMappingCacheEntry(cacheKey, {
           host: location.host,
           path: location.pathname,
           signature: cacheSignature,
         });
+        const cachedEntry = cacheLookup.entry;
+        if (cachedEntry?.mappings?.length) {
+          mappings = normalizeMappings(cachedEntry.mappings, scan.fields, resumeProfile);
+          cacheHit = true;
+          sendLog("info", "已命中本地字段映射缓存，跳过模型调用。");
+        } else {
+          sendLog("info", `[缓存] 未命中 reason="${cacheLookup.reason || "未知原因"}"`);
+          sendLog(
+            "info",
+            `已识别 ${lastFieldCount} 个字段，正在调用 AI 建立字段映射...`
+          );
 
-        sendLog("success", "字段映射已生成，并已写入本地缓存。");
+          const promptPayload = buildFieldMappingPayload(scan.fields, resumeProfile);
+          const aiText = await aiClient.callAI(
+            modelId,
+            JSON.stringify(promptPayload),
+            "field_mapping"
+          );
+          const parsed = parseJsonFromAiText(aiText);
+          mappings = normalizeMappings(parsed?.mappings, scan.fields, resumeProfile);
+
+          await saveMappingCacheEntry(cacheKey, {
+            updatedAt: Date.now(),
+            mappings,
+            host: location.host,
+            path: location.pathname,
+            signature: cacheSignature,
+          });
+
+          sendLog("success", "字段映射已生成，并已写入本地缓存。");
+        }
       }
 
       const mappingById = new Map();
@@ -310,6 +475,20 @@
 
       for (const field of scan.fields) {
         const mapping = mappingById.get(field.fieldId);
+        const adaptiveDecision = adaptiveDecisions.get(field.fieldId);
+        if (adaptive && adaptiveDecision && !adaptiveDecision.shouldFill) {
+          sendLog(
+            "warning",
+            diagnostics.formatSkipSummary(
+              field,
+              mapping,
+              adaptiveDecision.reason || "AI 判断当前字段不应填入",
+              "",
+              ""
+            )
+          );
+          continue;
+        }
         if (!mapping?.resumePath) {
           sendLog(
             "warning",
@@ -361,7 +540,48 @@
           continue;
         }
 
-        const fillResult = await fillOne(runtime, finalValue, { overwrite: fillMode !== "incremental" });
+        const learnedAdapter = adaptive
+          ? controlCapabilities.getAdapterStrategy?.(
+              adaptiveDecision?.controlType || runtime?.kind
+            )
+          : "";
+        // Keep a strict attempt count. The first attempt reuses a learned
+        // adapter when one exists; otherwise it uses the deterministic local
+        // filler. A fresh AI adapter is requested only after that attempt
+        // fails, and dangerous scripts are considered only after two failures.
+        let fillAttempts = 0;
+        let fillResult;
+        if (learnedAdapter && learnedAdapter !== "unsupported") {
+          fillAttempts += 1;
+          fillResult = await executeAdaptiveAdapter(runtime, finalValue, learnedAdapter);
+        } else {
+          fillAttempts += 1;
+          fillResult = await fillOne(runtime, finalValue, {
+            overwrite: fillMode !== "incremental",
+          });
+        }
+
+        if (!fillResult.filled && (adaptive || dangerMode)) {
+          fillAttempts += 1;
+          fillResult = await tryAdaptiveControlAdapter({
+            modelId,
+            field,
+            runtime,
+            value: finalValue,
+            decision: adaptiveDecision,
+          });
+        }
+
+        if (!fillResult.filled && dangerMode && fillAttempts >= 2) {
+          fillResult = await tryDangerousScriptAdapter({
+            modelId,
+            field,
+            runtime,
+            value: finalValue,
+            decision: adaptiveDecision,
+            dangerMode,
+          });
+        }
         sendLog(
           fillResult.filled ? "success" : "warning",
           diagnostics.formatFillSummary({
@@ -379,9 +599,14 @@
 
       lastFilledCount = filledCount;
       sendStats(lastFieldCount, lastMappedCount, lastFilledCount);
+      const unmappedFields = buildUnmappedFieldList(
+        scan.fields,
+        mappingById,
+        adaptiveDecisions
+      );
       sendLog(
         "success",
-        `填充完成：映射 ${lastMappedCount}/${lastFieldCount} 个字段，成功填充 ${lastFilledCount} 个。请检查后手动提交。`
+        `填充完成：映射 ${lastMappedCount}/${lastFieldCount} 个字段，成功填充 ${lastFilledCount} 个。${unmappedFields.length ? `仍有 ${unmappedFields.length} 个字段未映射，可在侧边栏选择加入标准简历。` : "请检查后手动提交。"}`
       );
 
       return {
@@ -390,9 +615,32 @@
         mappedCount: lastMappedCount,
         filledCount: lastFilledCount,
         cacheHit,
+        unmappedFields,
       };
     } finally {
       isWorking = false;
+    }
+  }
+
+  // The popup normally passes the current value explicitly. Reading the
+  // setting here as a compatibility fallback keeps the dangerous path gated
+  // when an older popup is still open after an extension reload.
+  async function resolveDangerMode(request) {
+    if (typeof request?.dangerMode === "boolean") {
+      return request.dangerMode;
+    }
+
+    try {
+      const data = await chrome.storage.local.get([
+        "dangerMode",
+        "dangerousMode",
+        "fillOptionsV1",
+      ]);
+      return data?.dangerMode === true ||
+        data?.dangerousMode === true ||
+        data?.fillOptionsV1?.dangerMode === true;
+    } catch (_) {
+      return false;
     }
   }
 
@@ -599,6 +847,128 @@
     return totalClicked;
   }
 
+  function buildUnmappedFieldList(fields, mappingById, adaptiveDecisions) {
+    return (Array.isArray(fields) ? fields : [])
+      .filter((field) => {
+        const mapping = mappingById?.get?.(String(field?.fieldId || ""));
+        return !mapping?.resumePath;
+      })
+      .map((field) => {
+        const decision = adaptiveDecisions?.get?.(String(field?.fieldId || ""));
+        return {
+          fieldId: String(field?.fieldId || ""),
+          label: String(field?.label || "").slice(0, 160),
+          kind: String(field?.kind || "unknown").slice(0, 40),
+          inputType: String(field?.inputType || "").slice(0, 40),
+          placeholder: String(field?.placeholder || "").slice(0, 160),
+          sectionKey: String(field?.sectionKey || "").slice(0, 80),
+          sectionLabel: String(field?.sectionLabel || "").slice(0, 120),
+          context: String(field?.context || "").slice(0, 240),
+          nearbyLabels: Array.isArray(field?.nearbyLabels)
+            ? field.nearbyLabels.map((item) => String(item || "").slice(0, 120)).slice(0, 8)
+            : [],
+          options: Array.isArray(field?.options)
+            ? field.options.map((item) => String(item || "").slice(0, 100)).slice(0, 20)
+            : [],
+          groupId: String(field?.groupId || "").slice(0, 100),
+          groupLabel: String(field?.groupLabel || "").slice(0, 120),
+          groupIndex: normalizeGroupIndex(field?.groupIndex),
+          groupPath: Array.isArray(field?.groupPath)
+            ? field.groupPath.slice(0, 6).map((item) => ({
+                groupId: String(item?.groupId || "").slice(0, 100),
+                label: String(item?.label || "").slice(0, 120),
+                kind: String(item?.kind || "").slice(0, 40),
+                index: normalizeGroupIndex(item?.index),
+              }))
+            : [],
+          groupFieldLabels: Array.isArray(field?.groupFieldLabels)
+            ? field.groupFieldLabels.map((item) => String(item || "").slice(0, 120)).slice(0, 30)
+            : [],
+          reason: String(decision?.reason || "未匹配到标准简历字段").slice(0, 240),
+        };
+      })
+      .filter((field) => field.fieldId);
+  }
+
+  function normalizeGroupIndex(value) {
+    if (value == null || value === "") return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  }
+
+  function buildFieldGroupPayload(fields, groups = null) {
+    const fieldList = Array.isArray(fields) ? fields : [];
+    const validFieldIds = new Set(
+      fieldList.map((field) => String(field?.fieldId || "").trim()).filter(Boolean)
+    );
+    const rawGroups = Array.isArray(groups)
+      ? groups
+      : Array.isArray(fields?.__groups)
+        ? fields.__groups
+        : [];
+    const sanitizedGroups = rawGroups
+      .map((group) => {
+        const fieldIds = Array.isArray(group?.fieldIds)
+          ? group.fieldIds
+              .map((id) => String(id || "").trim())
+              .filter((id) => validFieldIds.has(id))
+          : [];
+        if (!fieldIds.length) return null;
+        const groupPath = Array.isArray(group?.groupPath)
+          ? group.groupPath
+              .map((item) => ({
+                groupId: String(item?.groupId || "").slice(0, 100),
+                label: String(item?.label || "").slice(0, 120),
+                kind: String(item?.kind || "").slice(0, 40),
+                index: normalizeGroupIndex(item?.index),
+              }))
+              .filter((item) => item.groupId || item.label)
+              .slice(0, 6)
+          : [];
+        return {
+          groupId: String(group?.groupId || "").slice(0, 100),
+          label: String(group?.label || "").slice(0, 120),
+          parentGroupId: String(group?.parentGroupId || "").slice(0, 100),
+          kind: String(group?.kind || "").slice(0, 40),
+          index: normalizeGroupIndex(group?.index),
+          fieldIds,
+          fieldLabels: Array.isArray(group?.fieldLabels)
+            ? group.fieldLabels.map((label) => String(label || "").slice(0, 120)).filter(Boolean).slice(0, 30)
+            : [],
+          groupPath,
+        };
+      })
+      .filter(Boolean);
+
+    if (sanitizedGroups.length) return sanitizedGroups;
+
+    // Older group detectors may only annotate each field. Reconstruct a
+    // compact group list so the model still receives a coherent group view.
+    const byGroup = new Map();
+    for (const field of fieldList) {
+      const groupId = String(field?.groupId || "").trim();
+      if (!groupId) continue;
+      if (!byGroup.has(groupId)) {
+        byGroup.set(groupId, {
+          groupId,
+          label: String(field?.groupLabel || "").slice(0, 120),
+          parentGroupId: String(field?.parentGroupId || "").slice(0, 100),
+          kind: String(field?.groupKind || "").slice(0, 40),
+          index: normalizeGroupIndex(field?.groupIndex),
+          fieldIds: [],
+          fieldLabels: [],
+          groupPath: Array.isArray(field?.groupPath) ? field.groupPath.slice(0, 6) : [],
+        });
+      }
+      const group = byGroup.get(groupId);
+      const fieldId = String(field?.fieldId || "").trim();
+      if (fieldId && !group.fieldIds.includes(fieldId)) group.fieldIds.push(fieldId);
+      const fieldLabel = String(field?.label || field?.tableColumnLabel || "").trim();
+      if (fieldLabel && !group.fieldLabels.includes(fieldLabel)) group.fieldLabels.push(fieldLabel);
+    }
+    return Array.from(byGroup.values());
+  }
+
   function buildFieldMappingPayload(fields, resumeProfile) {
     const resumeFields = schema
       .getCatalogWithValues(resumeProfile)
@@ -625,8 +995,482 @@
         { type: "join", separator: ", " },
       ],
       fields,
+      // `typeof` keeps this helper compatible with the small isolated payload
+      // harness used by older integrations, where only this function is
+      // extracted without the surrounding group helper.
+      groups:
+        typeof buildFieldGroupPayload === "function"
+          ? buildFieldGroupPayload(fields)
+          : [],
       resumeFields,
     };
+  }
+
+  function buildAdaptiveFillPayload(fields, resumeProfile, options = {}) {
+    const resumeFields = schema
+      .getCatalogWithValues(resumeProfile)
+      .filter((field) => field.hasValue)
+      .map((field) => ({
+        path: field.path,
+        label: field.label,
+        sectionLabel: field.sectionLabel,
+        itemLabel: field.itemLabel || "",
+        input: field.input,
+        hasValue: field.hasValue,
+        valuePreview: field.valuePreview,
+        options: field.options || [],
+      }));
+
+    const fieldsWithSource = fields.map((field) => {
+      const runtime = fieldRuntimeMap.get(field.fieldId);
+      return {
+        ...field,
+        runtimeKind: runtime?.kind || field.kind || "unknown",
+        runtimeInputType: runtime?.inputType || field.inputType || "",
+        alreadyFilled: hasExistingFieldValue(runtime),
+        sourceSnippet: buildAdaptiveSourceSnippet(runtime),
+      };
+    });
+
+    const allCapabilities = controlCapabilities.getAll();
+    return {
+      mode: "adaptive_fill",
+      scope: options.scope === "page" ? "page" : "selection",
+      overwriteExisting: options.overwriteExisting === true,
+      url: sanitizePageUrl(location.href),
+      title: String(document.title || "").slice(0, 120),
+      supportedControlTypes: allCapabilities
+        .filter((item) => item.supported !== false)
+        .map((item) => ({ kind: item.kind, label: item.label, inputTypes: item.inputTypes })),
+      unsupportedControlTypes: allCapabilities
+        .filter((item) => item.supported === false)
+        .map((item) => ({ kind: item.kind, label: item.label, inputTypes: item.inputTypes })),
+      allowedTransforms: [
+        { type: "none" },
+        { type: "date_part", part: "year|month|day" },
+        { type: "phone_part", part: "countryCode|nationalNumber" },
+        { type: "boolean_choice", trueValue: "text", falseValue: "text" },
+        { type: "join", separator: ", " },
+      ],
+      fields: fieldsWithSource,
+      groups: buildFieldGroupPayload(fieldsWithSource, options.groups),
+      resumeFields,
+    };
+  }
+
+  function buildAdaptiveSourceSnippet(runtime) {
+    if (!runtime) return "";
+
+    const nodes = [];
+    const addNode = (node) => {
+      if (!node || nodes.includes(node)) return;
+      nodes.push(node);
+    };
+
+    addNode(runtime.el);
+    addNode(runtime.trigger);
+    addNode(runtime.root);
+    if (runtime.el) addNode(getStructuralContainer(runtime.el));
+    for (const option of runtime.options || []) addNode(option?.el);
+    // Dropdown libraries commonly render their list in a body-level portal;
+    // include the nearby visible popup so an adaptive retry can identify the
+    // real option nodes and their data/value attributes.
+    for (const popup of getCustomDropdownPopupRoots(runtime)) addNode(popup);
+
+    return nodes
+      .map((node) => sanitizeAdaptiveDomNode(node))
+      .filter(Boolean)
+      .join("\n")
+      .slice(0, 7000);
+  }
+
+  function sanitizeAdaptiveDomNode(node) {
+    if (!node) return "";
+
+    try {
+      const clone = node.cloneNode?.(true);
+      if (!clone) return "";
+
+      for (const removable of clone.querySelectorAll?.("script,style,noscript,iframe") || []) {
+        removable.remove();
+      }
+
+      const sensitiveAttribute = /^(?:value|checked|selected)$/i;
+      const sensitiveName = /(token|secret|password|api[-_]?key|authorization)/i;
+      const elements = [clone, ...(clone.querySelectorAll?.("*") || [])];
+      for (const element of elements) {
+        for (const attribute of Array.from(element.attributes || [])) {
+          if (sensitiveAttribute.test(attribute.name) || sensitiveName.test(attribute.name)) {
+            element.removeAttribute(attribute.name);
+          }
+        }
+      }
+
+      return String(clone.outerHTML || "").slice(0, 3500);
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function normalizeAdaptiveDecisions(rawDecisions, fields) {
+    const resumeProfile = arguments[2];
+    const validFieldIds = new Set(fields.map((field) => String(field.fieldId)));
+    const validResumePaths = new Set(
+      schema.getFieldCatalog({ mode: "profile", profile: resumeProfile }).map((field) => field.path)
+    );
+    const normalized = [];
+
+    for (const item of Array.isArray(rawDecisions) ? rawDecisions : []) {
+      const fieldId = String(item?.fieldId || "").trim();
+      if (!fieldId || !validFieldIds.has(fieldId)) continue;
+
+      const field = fields.find((entry) => String(entry.fieldId) === fieldId);
+      const requestedKind = item?.controlType || item?.strategy || field?.kind || "unknown";
+      const controlType = controlCapabilities.normalizeKind(requestedKind) || "unknown";
+      const strategy = controlCapabilities.normalizeKind(item?.strategy || controlType) || controlType;
+      const shouldFill = item?.shouldFill === true || /^(true|yes|1)$/i.test(String(item?.shouldFill || ""));
+      const resumePath = String(item?.resumePath || "").trim();
+
+      normalized.push({
+        fieldId,
+        shouldFill,
+        resumePath: resumePath && validResumePaths.has(resumePath) ? resumePath : "",
+        reason: String(item?.reason || "").trim().slice(0, 240),
+        controlType,
+        strategy,
+        transform: normalizeTransform(item?.transform),
+      });
+    }
+
+    return normalized;
+  }
+
+  function isAdaptiveStrategyCompatible(strategy, runtime) {
+    const strategyKind = controlCapabilities.normalizeKind(strategy || "");
+    const runtimeKind = controlCapabilities.normalizeKind(runtime?.kind || "");
+    if (!strategyKind || !runtimeKind) return false;
+    if (strategyKind === runtimeKind) return true;
+    if (strategyKind === "text" && ["text", "textarea"].includes(runtimeKind)) return true;
+    if (strategyKind === "textarea" && runtimeKind === "text") return true;
+    if (strategyKind === "readonly_date" && runtimeKind === "text") return true;
+    return false;
+  }
+
+  async function tryAdaptiveControlAdapter({ modelId, field, runtime, value, decision }) {
+    try {
+      sendLog("info", `字段 ${field.fieldId} 常规填充失败，正在请求 AI 适配控件...`);
+      const payload = {
+        mode: "control_adapter",
+        field: {
+          ...field,
+          sourceSnippet: buildAdaptiveSourceSnippet(runtime),
+        },
+        runtime: {
+          kind: runtime?.kind || "unknown",
+          adapter: getCustomDropdownAdapter(runtime?.el || runtime?.root),
+          inputType: runtime?.inputType || "",
+          readOnly: Boolean(runtime?.readOnly),
+          label: runtime?.label || field?.label || "",
+          placeholder: runtime?.placeholder || field?.placeholder || "",
+          context: runtime?.context || field?.context || "",
+        },
+        currentDecision: decision || null,
+        valueType: Array.isArray(value) ? "array" : "text",
+        supportedControlTypes: controlCapabilities
+          .getAll()
+          .filter((item) => item.supported !== false)
+          .map((item) => item.kind),
+      };
+
+      const aiText = await aiClient.callAI(
+        modelId,
+        JSON.stringify(payload),
+        "control_adapter"
+      );
+      const parsed = parseJsonFromAiText(aiText);
+      const adapterType = controlCapabilities.normalizeKind(parsed?.adapter?.type || "");
+      if (!adapterType || adapterType === "unsupported") {
+        return { filled: false, message: "AI 未给出安全的控件适配策略" };
+      }
+
+      const result = await executeAdaptiveAdapter(runtime, value, adapterType);
+      if (result.filled) {
+        // A successful strategy becomes a learned capability for this
+        // control shape. It is persisted through the shared catalogue so the
+        // next adaptive run can advertise it to the model and settings UI.
+        const registered = controlCapabilities.registerSupported?.(
+          decision?.controlType || runtime?.kind,
+          {
+            label: field?.label || runtime?.label || decision?.controlType || runtime?.kind,
+            inputTypes: runtime?.inputType ? [runtime.inputType] : [],
+            adapterKind: adapterType,
+          }
+        );
+        if (registered) {
+          sendLog("info", `控件类型 ${registered.kind} 已注册为受支持（${adapterType}）`);
+        }
+        return {
+          ...result,
+          message: `已使用 AI 适配策略 ${adapterType}${registered ? "并注册控件类型" : ""}`,
+        };
+      }
+      return result;
+    } catch (error) {
+      return { filled: false, message: `AI 控件适配失败：${error?.message || String(error)}` };
+    }
+  }
+
+  /**
+   * Last-resort adapter used only when the user explicitly enables danger
+   * mode. The model receives no execution privileges during analysis; it can
+   * return a script, but this function validates and runs it only after two
+   * failed fill attempts. The script is scoped to the current element via a
+   * short-lived data attribute and never receives extension APIs or storage.
+   */
+  async function tryDangerousScriptAdapter({
+    modelId,
+    field,
+    runtime,
+    value,
+    decision,
+    dangerMode,
+  }) {
+    if (dangerMode !== true) {
+      return { filled: false, message: "危险模式未开启" };
+    }
+    if (!runtime || runtime.kind === "file") {
+      return { filled: false, message: "文件上传字段不允许危险模式脚本" };
+    }
+
+    try {
+      sendLog("warning", `字段 ${field.fieldId} 已连续两次填充失败，危险模式请求 AI 脚本适配...`);
+      const payload = {
+        mode: "dangerous_fill_adapter",
+        field: {
+          ...field,
+          sourceSnippet: buildAdaptiveSourceSnippet(runtime),
+        },
+        runtime: {
+          kind: runtime?.kind || "unknown",
+          adapter: getCustomDropdownAdapter(runtime?.el || runtime?.root),
+          inputType: runtime?.inputType || "",
+          readOnly: Boolean(runtime?.readOnly),
+          label: runtime?.label || field?.label || "",
+          placeholder: runtime?.placeholder || field?.placeholder || "",
+          context: runtime?.context || field?.context || "",
+        },
+        currentDecision: decision || null,
+        // The value is required for strategy design, but the page script gets
+        // it through a JSON literal rather than extension globals.
+        value,
+      };
+      const aiText = await aiClient.callAI(
+        modelId,
+        JSON.stringify(payload),
+        "dangerous_fill_adapter"
+      );
+      const parsed = parseJsonFromAiText(aiText);
+      const adapter = parsed?.adapter || {};
+      const adapterType = String(adapter.type || "").trim().toLowerCase();
+      if (adapterType !== "script") {
+        return { filled: false, message: "AI 未返回危险模式脚本策略" };
+      }
+
+      const script = String(adapter.script || "").trim();
+      const validation = validateDangerousFillScript(script);
+      if (!validation.ok) {
+        return { filled: false, message: `危险模式脚本已拦截：${validation.reason}` };
+      }
+
+      const result = await executeDangerousFillScript(runtime, value, script);
+      if (!result.filled) return result;
+
+      // Keep a successful control shape visible in the shared capability
+      // catalogue. We intentionally do not persist the arbitrary script; a
+      // later run still has to pass the normal two-failure gate before asking
+      // the model for a fresh script.
+      const registered = controlCapabilities.registerSupported?.(
+        decision?.controlType || runtime?.kind,
+        {
+          label: field?.label || runtime?.label || decision?.controlType || runtime?.kind,
+          inputTypes: runtime?.inputType ? [runtime.inputType] : [],
+        }
+      );
+      if (registered) {
+        sendLog("info", `危险模式成功：控件类型 ${registered.kind} 已注册为受支持`);
+      }
+      return {
+        ...result,
+        message: `已使用危险模式 AI 脚本适配控件${registered ? "并注册控件类型" : ""}`,
+      };
+    } catch (error) {
+      return {
+        filled: false,
+        message: `危险模式脚本适配失败：${error?.message || String(error)}`,
+      };
+    }
+  }
+
+  function validateDangerousFillScript(script) {
+    if (!script) return { ok: false, reason: "脚本为空" };
+    if (script.length > 4000) return { ok: false, reason: "脚本超过 4000 个字符" };
+
+    // Keep the script useful for custom controls while blocking page-wide
+    // traversal, data exfiltration, extension APIs and destructive actions.
+    const forbidden = [
+      /\beval\s*\(/i,
+      /\bFunction\s*\(/i,
+      /\bimport\s*\(/i,
+      /\b(?:fetch|XMLHttpRequest|WebSocket|EventSource)\b/i,
+      /\b(?:chrome|browser)\s*\./i,
+      /\b(?:localStorage|sessionStorage|indexedDB|document\.cookie)\b/i,
+      /\bdocument\s*\.\s*(?:querySelector|querySelectorAll|getElementById|getElementsBy)/i,
+      /\b(?:querySelector(?:All)?|getElementById|getElementsBy(?:TagName|ClassName|Name)?)\s*\(/i,
+      /\b(?:window|globalThis|self)\s*\./i,
+      /\b(?:window|globalThis|self)\b/i,
+      /\b(?:ownerDocument|defaultView|parentNode|parentElement|children|firstChild|lastChild|nextSibling|previousSibling|form)\b/i,
+      /\b(?:submit|requestSubmit)\s*\(/i,
+      /\b(?:alert|confirm|prompt)\s*\(/i,
+      /\b(?:location|history|navigator)\b/i,
+      /\bdocument\s*\.\s*(?:body|head|documentElement|forms|links|images|scripts|styleSheets|all|activeElement)\b/i,
+      /<\s*\/?\s*script\b|javascript\s*:/i,
+      /\b(?:setTimeout|setInterval)\s*\(/i,
+      /\bwhile\s*\(|for\s*\([^;]*;[^;]*;[^)]*\)/i,
+      /(?:constructor|prototype|__proto__)\b/i,
+    ];
+    const blocked = forbidden.find((pattern) => pattern.test(script));
+    return blocked
+      ? { ok: false, reason: "脚本包含受限制的 API 或页面遍历操作" }
+      : { ok: true };
+  }
+
+  async function executeDangerousFillScript(runtime, value, script) {
+    const el = runtime?.el;
+    if (!el || runtime?.kind === "file") {
+      return { filled: false, message: "当前控件无法执行危险模式脚本" };
+    }
+
+    const before = getDangerousRuntimeFingerprint(runtime);
+    const token = `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    const targetAttribute = "data-ai-resume-danger-target";
+    const doneAttribute = "data-ai-resume-danger-done";
+    const escapedToken = token.replace(/[^a-z0-9_-]/gi, "");
+    const valueLiteral = JSON.stringify(value);
+    const runtimeLiteral = JSON.stringify({
+      kind: runtime?.kind || "unknown",
+      inputType: runtime?.inputType || "",
+      label: runtime?.label || "",
+      placeholder: runtime?.placeholder || "",
+    });
+
+    el.setAttribute(targetAttribute, escapedToken);
+    document.documentElement.setAttribute(doneAttribute, "pending");
+
+    // Append into the page world so frameworks that observe native DOM
+    // setters/events can process the same operation as an inline script.
+    const scriptEl = document.createElement("script");
+    scriptEl.textContent = [
+      "(async function(){",
+      "try {",
+      `const el = document.querySelector('[${targetAttribute}="${escapedToken}"]');`,
+      `const value = ${valueLiteral};`,
+      `const runtime = ${runtimeLiteral};`,
+      "if (!el) throw new Error('目标控件不存在');",
+      script,
+      // Flush one microtask so framework updates scheduled by the script are
+      // observed before the content-side verification runs.
+      "await Promise.resolve();",
+      `document.documentElement.setAttribute('${doneAttribute}', 'ok');`,
+      "} catch (error) {",
+      `document.documentElement.setAttribute('${doneAttribute}', 'error');`,
+      "}",
+      "})();",
+    ].join("\n");
+
+    try {
+      (document.head || document.documentElement).appendChild(scriptEl);
+      const deadline = Date.now() + 1500;
+      while (Date.now() < deadline) {
+        const state = document.documentElement.getAttribute(doneAttribute);
+        if (state === "ok" || state === "error") break;
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      }
+    } finally {
+      scriptEl.remove();
+      el.removeAttribute(targetAttribute);
+      document.documentElement.removeAttribute(doneAttribute);
+    }
+
+    const after = getDangerousRuntimeFingerprint(runtime);
+    const expected = prepareTextValueForRuntime(runtime, value);
+    const changed = Boolean(after) && after !== before;
+    const matched = expected && String(after).includes(String(expected));
+    return changed || matched
+      ? { filled: true }
+      : { filled: false, message: "危险模式脚本执行后校验仍未通过" };
+  }
+
+  function getDangerousRuntimeFingerprint(runtime) {
+    if (!runtime) return "";
+    if (runtime.kind === "checkbox_group" || runtime.kind === "radio_group") {
+      return (runtime.options || [])
+        .filter((option) => option?.el?.checked)
+        .map((option) => String(option.label || option.value || "").trim())
+        .join("|");
+    }
+    if (runtime.kind === "select") {
+      return String(runtime.el?.value || runtime.el?.selectedOptions?.[0]?.textContent || "").trim();
+    }
+    if (runtime.kind === "combobox") {
+      return getCustomDropdownCommittedTexts(runtime).join("|");
+    }
+    if (runtime.kind === "contenteditable") {
+      return String(runtime.el?.textContent || "").trim();
+    }
+    return String(runtime.el?.value || runtime.el?.textContent || "").trim();
+  }
+
+  async function executeAdaptiveAdapter(runtime, value, adapterType) {
+    if (!runtime || runtime.kind === "file") {
+      return { filled: false, message: "当前控件不能安全适配" };
+    }
+
+    if (["text", "textarea", "native_value"].includes(adapterType)) {
+      const desired = prepareTextValueForRuntime(runtime, value);
+      if (!desired) return { filled: false, message: "适配值为空" };
+      const ok = await setValueWithEvents(runtime.el, desired, runtime);
+      return ok ? { filled: true } : { filled: false, message: "适配写入未通过校验" };
+    }
+
+    if (adapterType === "select") {
+      const ok = await selectByText(runtime.el, value);
+      return ok ? { filled: true } : { filled: false, message: "适配下拉选择失败" };
+    }
+
+    if (adapterType === "combobox") {
+      const ok = await selectCustomDropdownOption(runtime, value);
+      return ok ? { filled: true } : { filled: false, message: "适配自定义下拉失败" };
+    }
+
+    if (adapterType === "contenteditable") {
+      const desired = prepareTextValueForRuntime(runtime, value);
+      if (!desired) return { filled: false, message: "适配值为空" };
+      runtime.el.focus?.();
+      runtime.el.textContent = desired;
+      runtime.el.dispatchEvent(new Event("input", { bubbles: true }));
+      runtime.el.dispatchEvent(new Event("change", { bubbles: true }));
+      return { filled: true };
+    }
+
+    if (adapterType === "radio_group" || adapterType === "checkbox_group") {
+      return fillOne(
+        { ...runtime, kind: adapterType },
+        value,
+        { overwrite: false }
+      );
+    }
+
+    return { filled: false, message: `不允许执行适配策略 ${adapterType}` };
   }
 
   function sanitizePageUrl(value) {
@@ -646,9 +1490,10 @@
   }
 
   function normalizeMappings(rawMappings, fields) {
+    const resumeProfile = arguments[2];
     const validFieldIds = new Set(fields.map((field) => String(field.fieldId)));
     const validResumePaths = new Set(
-      schema.getFieldCatalog({ mode: "max" }).map((field) => field.path)
+      schema.getFieldCatalog({ mode: "profile", profile: resumeProfile }).map((field) => field.path)
     );
     const normalized = [];
 
@@ -927,8 +1772,263 @@
     };
   }
 
+  function hasCustomDropdownClassHint(el) {
+    const className = String(el?.className || "");
+    const identity = [
+      className,
+      el?.id,
+      el?.getAttribute?.("name"),
+      el?.getAttribute?.("data-testid"),
+      el?.getAttribute?.("data-test-id"),
+      el?.getAttribute?.("data-component"),
+      el?.getAttribute?.("data-role"),
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    return /(^|[\s_-])(select|select2|selectbox|chosen|layui|dropdown|drop[-_]?menu|combobox|autocomplete)([\s_-]|$)/i.test(identity);
+  }
+
+  function getCustomDropdownAdapter(el) {
+    if (!el) return "generic";
+
+    const nodes = [];
+    let current = el;
+    for (let depth = 0; current && depth < 6; depth += 1) {
+      nodes.push(current);
+      current = current.parentElement;
+    }
+
+    const identity = nodes
+      .flatMap((node) => [
+        node?.className,
+        node?.id,
+        node?.getAttribute?.("data-component"),
+        node?.getAttribute?.("data-role"),
+      ])
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+
+    if (/\b(?:el-select|el-cascader|el-tree-select|el-autocomplete)\b/.test(identity)) {
+      return "element";
+    }
+    if (/\b(?:ant-select|ant-cascader|ant-tree-select)\b/.test(identity)) {
+      return "ant";
+    }
+    if (/\b(?:ivu-select|i-select)\b/.test(identity)) {
+      return "ivu";
+    }
+    if (/\b(?:layui-form-select|layui-select)\b/.test(identity)) {
+      return "layui";
+    }
+    if (/\b(?:chosen-container|chosen-single|chosen-choices|chosen-drop)\b/.test(identity)) {
+      return "chosen";
+    }
+    if (/\b(?:select2-container|select2-selection|select2-dropdown)\b/.test(identity)) {
+      return "select2";
+    }
+
+    const role = String(el.getAttribute?.("role") || "").toLowerCase();
+    const controls = el.getAttribute?.("aria-controls") || el.getAttribute?.("aria-owns");
+    if (el.tagName?.toLowerCase?.() === "input" &&
+        (el.readOnly || el.getAttribute?.("aria-readonly") === "true") &&
+        controls) {
+      return "readonly-popup";
+    }
+    if (role === "combobox" || controls) {
+      return "aria";
+    }
+    if (/\b(?:select-box|select_box|selectbox|drop-menu|drop_menu|dropmenu|dropdown-select|bootstrap-select|bs-select)\b/.test(identity)) {
+      return "generic-menu";
+    }
+    return "generic";
+  }
+
+  function findCustomDropdownRoot(el) {
+    if (!el) return null;
+
+    const explicitRoot = el.closest?.(CUSTOM_DROPDOWN_CONTROL_SELECTOR);
+    if (explicitRoot) return explicitRoot;
+
+    let current = el;
+    let matched = null;
+    for (let depth = 0; current && depth < 4; depth += 1) {
+      if (hasCustomDropdownClassHint(current)) {
+        matched = current;
+      }
+      current = current.parentElement;
+    }
+
+    return matched || el;
+  }
+
+  function isCustomDropdownElement(el, semanticMeta = null) {
+    if (!el || el.tagName?.toLowerCase?.() === "select") return false;
+
+    const role = String(el.getAttribute?.("role") || "").toLowerCase();
+    const popupRole = String(el.getAttribute?.("aria-haspopup") || "").toLowerCase();
+    const adapter = getCustomDropdownAdapter(el);
+    const controls = [
+      el.getAttribute?.("aria-controls"),
+      el.getAttribute?.("aria-owns"),
+    ]
+      .filter(Boolean)
+      .flatMap((value) => String(value).split(/\s+/g));
+    const hasClassHintOnElement = hasCustomDropdownClassHint(el);
+    const hasExplicitSemantics =
+      role === "combobox" ||
+      popupRole === "listbox" ||
+      ["list", "both"].includes(String(el.getAttribute?.("aria-autocomplete") || "").toLowerCase()) ||
+      (el.hasAttribute?.("aria-expanded") &&
+        controls.length > 0) ||
+      // A number of date/address pickers expose a readonly input with an
+      // aria-controls hook but omit role=combobox. Treat it as a dropdown only
+      // when the referenced panel looks like a listbox/options popup.
+      (el.tagName?.toLowerCase?.() === "input" &&
+        (el.readOnly || el.getAttribute?.("aria-readonly") === "true") &&
+        controls.length > 0 &&
+        controls.some((id) => {
+          const target = document.getElementById?.(String(id).replace(/^#/, ""));
+          if (!target) return false;
+          const targetRole = String(target.getAttribute?.("role") || "").toLowerCase();
+          return targetRole === "listbox" || Boolean(target.querySelector?.(CUSTOM_DROPDOWN_OPTION_SELECTOR));
+        }));
+
+    const root = findCustomDropdownRoot(el);
+    const hasClassHint =
+      hasClassHintOnElement ||
+      (root && root !== el && hasCustomDropdownClassHint(root));
+    const semanticText = [
+      semanticMeta?.label,
+      semanticMeta?.context,
+      semanticMeta?.sectionLabel,
+      el.getAttribute?.("placeholder"),
+      el.getAttribute?.("name"),
+      root?.className,
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const looksLikeDate = /(日期|出生|年月|入学|毕业|时间|calendar|datepicker|date-picker)/i.test(
+      semanticText
+    );
+
+    if (
+      looksLikeDate &&
+      popupRole !== "listbox" &&
+      !hasClassHint &&
+      !["element", "layui", "chosen", "select2"].includes(adapter)
+    ) return false;
+    return hasExplicitSemantics || hasClassHint;
+  }
+
+  function resolveCustomDropdownControl(el) {
+    if (!el) return null;
+    if (el.tagName?.toLowerCase?.() === "input") return el;
+
+    const nestedSemantic = el.querySelector?.(
+      '[role="combobox"],[aria-haspopup="listbox"],input[aria-controls],input[aria-owns]'
+    );
+    if (nestedSemantic) return nestedSemantic;
+
+    const nestedInput = el.querySelector?.(
+      'input:not([type="hidden"]),[contenteditable="true"],[contenteditable=""]'
+    );
+    return nestedInput || el;
+  }
+
+  function findCustomDropdownTrigger(el) {
+    if (!el) return null;
+
+    const adapter = getCustomDropdownAdapter(el);
+    const root = findCustomDropdownRoot(el);
+    const adapterSelectors = {
+      element: '.el-select__wrapper,.el-select .el-input__inner,.el-select__caret,.el-input__inner,.el-autocomplete .el-input__inner',
+      ant: '.ant-select-selector,.ant-select-selection-search-input,.ant-select-arrow',
+      ivu: '.ivu-select-selection,.ivu-select-input,.ivu-select-arrow',
+      layui: '.layui-select-title input,.layui-select-title,.layui-edge',
+      chosen: '.chosen-single,.chosen-choices,.chosen-search input',
+      select2: '.select2-selection,[role="combobox"]',
+      "generic-menu": '[class*="select-box"],[class*="select_box"],[class*="selectbox"],[class*="selectBox"],[class*="drop-menu"],[class*="drop_menu"],[class*="dropmenu"],[class*="dropdown-select"],[class*="bootstrap-select"],[class*="bs-select"]',
+    };
+    const adapterSelector = adapterSelectors[adapter];
+    const adapterTrigger = adapterSelector
+      ? root?.querySelector?.(adapterSelector)
+      : null;
+    if (adapterTrigger) return adapterTrigger;
+
+    const explicitTrigger = el.closest?.(
+      'label,[role="combobox"],[aria-haspopup="listbox"],[class*="Select-container"],[class*="select-container"]'
+    );
+    if (explicitTrigger) return explicitTrigger;
+
+    const nestedTrigger = root?.querySelector?.(
+      'label,[role="combobox"],[aria-haspopup="listbox"],[class*="Select-container"],[class*="select-container"],[class*="select-box"],[class*="drop-menu"]'
+    );
+    return nestedTrigger || root || el;
+  }
+
+  function getCustomDropdownOptionLabel(option) {
+    if (!option) return "";
+    return normalizeText(
+      option.getAttribute?.("aria-label") ||
+        option.getAttribute?.("data-label") ||
+        option.getAttribute?.("data-text") ||
+        option.getAttribute?.("data-name") ||
+        option.getAttribute?.("title") ||
+        option.textContent ||
+        option.getAttribute?.("lay-value") ||
+        option.getAttribute?.("data-code") ||
+        option.getAttribute?.("value") ||
+        ""
+    );
+  }
+
+  function collectDeclaredComboboxOptions(el) {
+    const root = findCustomDropdownRoot(el);
+    const ids = [
+      root?.getAttribute?.("aria-controls"),
+      root?.getAttribute?.("aria-owns"),
+      el?.getAttribute?.("aria-controls"),
+      el?.getAttribute?.("aria-owns"),
+    ]
+      .filter(Boolean)
+      .flatMap((value) => String(value).split(/\s+/g));
+
+    const labels = [];
+    for (const id of ids) {
+      const target = document.getElementById?.(id.replace(/^#/, ""));
+      if (!target) continue;
+      for (const option of Array.from(
+        target.querySelectorAll?.(CUSTOM_DROPDOWN_OPTION_SELECTOR) || []
+      )) {
+        const label = getCustomDropdownOptionLabel(option);
+        if (label && !labels.includes(label)) labels.push(label);
+      }
+    }
+
+    return labels.slice(0, 60);
+  }
+
+  function buildCustomDropdownRuntime(fieldId, el, semanticMeta) {
+    const root = findCustomDropdownRoot(el);
+    const trigger = findCustomDropdownTrigger(el);
+    return {
+      fieldId,
+      kind: "combobox",
+      el,
+      trigger,
+      root: root || el,
+      label: semanticMeta?.label || "",
+      placeholder: el.getAttribute?.("placeholder") || "",
+      context: semanticMeta?.context || "",
+      nearbyLabels: semanticMeta?.nearbyLabels || [],
+    };
+  }
+
   function scanFields({ scope = "page", selectionRect = null } = {}) {
-    const root = scope === "selection" ? document : pickLikelyFormRoot();
+    const fullPage = arguments[0]?.fullPage === true;
+    const root = scope === "selection" || fullPage ? document : pickLikelyFormRoot();
     const elements = collectControls(root);
 
     const fields = [];
@@ -937,6 +2037,7 @@
     let idSeq = 0;
     const radioGroups = new Map();
     const checkboxGroups = new Map();
+    const scannedCustomDropdownRoots = new WeakSet();
 
     for (const el of elements) {
       if (!isFillableElement(el)) continue;
@@ -957,6 +2058,28 @@
         sectionEvidence: semanticMeta.sectionEvidence,
         nearbyLabels: semanticMeta.nearbyLabels,
       };
+
+      if (tag !== "select" && isCustomDropdownElement(el, semanticMeta)) {
+        const root = findCustomDropdownRoot(el) || el;
+        if (scannedCustomDropdownRoots.has(root)) continue;
+        scannedCustomDropdownRoots.add(root);
+
+        const control = resolveCustomDropdownControl(el) || el;
+        const fieldId = `f_${++idSeq}`;
+        fields.push({
+          fieldId,
+          kind: "select",
+          label: semanticMeta.label,
+          name: control.getAttribute?.("name") || el.getAttribute?.("name") || "",
+          id: control.id || el.id || "",
+          placeholder: control.getAttribute?.("placeholder") || "",
+          options: collectDeclaredComboboxOptions(control),
+          ...commonMeta,
+        });
+
+        runtime.push(buildCustomDropdownRuntime(fieldId, control, semanticMeta));
+        continue;
+      }
 
       if (tag === "select") {
         const fieldId = `f_${++idSeq}`;
@@ -1292,7 +2415,7 @@
   function collectControls(root) {
     const scope = root || document;
     const selectors =
-      'input, textarea, select, [contenteditable="true"], [contenteditable=""]';
+      `input, textarea, select, [contenteditable="true"], [contenteditable=""], ${CUSTOM_DROPDOWN_HOST_SELECTOR}`;
 
     return Array.from(scope.querySelectorAll(selectors)).filter((el) => isVisible(el));
   }
@@ -1647,6 +2770,15 @@
       return true;
     }
 
+    if (runtime.kind === "combobox") {
+      const placeholder = normalizeText(runtime.placeholder || "");
+      return getCustomDropdownCommittedTexts(runtime).some((text) => {
+        const normalized = normalizeText(text);
+        if (!normalized || (placeholder && normalized === placeholder)) return false;
+        return !/^(请选择|请选择一项|选择|请选择内容|请输入|select|please select)$/i.test(normalized);
+      });
+    }
+
     if (runtime.kind === "contenteditable") {
       return Boolean(String(runtime.el?.textContent || "").trim());
     }
@@ -1697,8 +2829,15 @@
     }
 
     if (runtime.kind === "select") {
-      const ok = selectByText(runtime.el, value);
+      const ok = await selectByText(runtime.el, value);
       return ok ? { filled: true } : { filled: false, message: "未找到可匹配的下拉选项" };
+    }
+
+    if (runtime.kind === "combobox") {
+      const ok = await selectCustomDropdownOption(runtime, value);
+      return ok
+        ? { filled: true }
+        : { filled: false, message: "未找到或未能选中匹配的自定义下拉选项" };
     }
 
     if (runtime.kind === "contenteditable") {
@@ -2143,10 +3282,19 @@
       return;
     }
 
+    if (tag === "select") {
+      const setter =
+        typeof HTMLSelectElement !== "undefined"
+          ? Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set
+          : null;
+      setter ? setter.call(element, value) : (element.value = value);
+      return;
+    }
+
     element.value = value;
   }
 
-  function selectByText(selectEl, desired) {
+  async function selectByText(selectEl, desired) {
     if (!selectEl?.options) return false;
 
     scrollIntoView(selectEl);
@@ -2156,15 +3304,399 @@
         label: String(option.textContent || "").trim(),
         value: option.value,
       }))
-      .filter((option) => option.label);
+      .filter((option) => option.label || String(option.value ?? "").trim());
 
     const best = pickBestOption(options, desired);
     if (!best) return false;
 
-    selectEl.value = best.value;
-    selectEl.dispatchEvent(new Event("change", { bubbles: true }));
+    setNativeValue(selectEl, best.value);
     selectEl.dispatchEvent(new Event("input", { bubbles: true }));
-    return true;
+    selectEl.dispatchEvent(new Event("change", { bubbles: true }));
+    await sleep(60);
+    return String(selectEl.value ?? "") === String(best.value ?? "");
+  }
+
+  function getCustomDropdownCurrentTexts(runtime) {
+    const values = [];
+    const add = (value) => {
+      const text = normalizeText(value);
+      if (text && !values.includes(text)) values.push(text);
+    };
+
+    const control = runtime?.el;
+    const root = runtime?.root || runtime?.trigger || control;
+    add(control?.value);
+    add(control?.getAttribute?.("aria-valuetext"));
+    add(control?.getAttribute?.("data-value"));
+    if (control?.tagName?.toLowerCase?.() !== "input") {
+      add(control?.textContent);
+    }
+
+    if (root && root !== control) {
+      const selected = root.querySelector?.(
+        '[aria-selected="true"],[class*="selected"],[class*="Selected"],[class*="value"],[class*="Value"],[class*="chosen-single"],[class*="select2-selection__rendered"],[class*="el-select__selected-item"],[class*="layui-select-title"],[class*="ant-select-selection-item"],[class*="ivu-select-selected-value"]'
+      );
+      add(selected?.textContent);
+    }
+
+    return values;
+  }
+
+  function getCustomDropdownCommittedTexts(runtime) {
+    const values = [];
+    const add = (value) => {
+      const text = normalizeText(value);
+      if (text && !values.includes(text)) values.push(text);
+    };
+
+    const control = runtime?.el;
+    const root = runtime?.root || runtime?.trigger || control;
+    // Element/Ant/Select2 and many domestic recruitment forms keep the
+    // committed display value in a normal input or rendered span without an
+    // aria-selected marker. Include those values for incremental-fill checks.
+    add(control?.value);
+    add(control?.getAttribute?.("aria-valuetext"));
+    add(control?.getAttribute?.("data-value"));
+    if (control?.getAttribute?.("aria-selected") === "true") {
+      add(control?.value);
+    }
+
+    const selectedNodes = root?.querySelectorAll?.(
+      '[aria-selected="true"],[class*="selected"],[class*="Selected"],[class*="active"],[class*="Active"],[class*="display-value"],[class*="Display-value"],[class*="chosen-single"],[class*="select2-selection__rendered"],[class*="el-select__selected-item"],[class*="layui-select-title"],[class*="ant-select-selection-item"],[class*="ivu-select-selected-value"]'
+    ) || [];
+    for (const node of selectedNodes) {
+      add(node.textContent);
+    }
+
+    return values;
+  }
+
+  function isCustomDropdownMultiSelect(runtime) {
+    const control = runtime?.el;
+    const root = runtime?.root || runtime?.trigger || control;
+    const identity = [
+      control?.className,
+      root?.className,
+      control?.getAttribute?.("aria-multiselectable"),
+      root?.getAttribute?.("aria-multiselectable"),
+    ]
+      .filter(Boolean)
+      .join(" ");
+    return (
+      control?.getAttribute?.("aria-multiselectable") === "true" ||
+      root?.getAttribute?.("aria-multiselectable") === "true" ||
+      /(?:multiple|multiselect|multi-select|el-select--multiple|ant-select-multiple|chosen-choices)/i.test(identity)
+    );
+  }
+
+  function isCustomDropdownCascader(runtime) {
+    const control = runtime?.el;
+    const root = runtime?.root || runtime?.trigger || control;
+    const identity = [control?.className, root?.className, control?.id, root?.id]
+      .filter(Boolean)
+      .join(" ");
+    return /(?:cascader|级联|tree-select)/i.test(identity);
+  }
+
+  function getCustomDropdownDesiredValues(runtime, desired) {
+    const values = Array.isArray(desired)
+      ? desired
+      : isCustomDropdownCascader(runtime)
+        ? String(desired ?? "").split(/[\/>／＞，,、;；]+/g)
+        : isCustomDropdownMultiSelect(runtime)
+          ? String(desired ?? "").split(/[，,、;；]+/g)
+          : [desired];
+    return values
+      .flatMap((item) => (Array.isArray(item) ? item : [item]))
+      .flatMap((item) =>
+        isCustomDropdownCascader(runtime)
+          ? String(item ?? "").split(/[\/>／＞，,、;；]+/g)
+          : [item]
+      )
+      .map((item) => String(item ?? "").trim())
+      .filter(Boolean);
+  }
+
+  function getCustomDropdownPopupRoots(runtime) {
+    const roots = [];
+    const seen = new Set();
+    const addRoot = (root) => {
+      if (!root || seen.has(root)) return;
+      seen.add(root);
+      roots.push(root);
+    };
+
+    const control = runtime?.el;
+    const trigger = runtime?.trigger || control;
+    const adapter = getCustomDropdownAdapter(control || trigger);
+    const ids = [
+      control?.getAttribute?.("aria-controls"),
+      control?.getAttribute?.("aria-owns"),
+      trigger?.getAttribute?.("aria-controls"),
+      trigger?.getAttribute?.("aria-owns"),
+    ]
+      .filter(Boolean)
+      .flatMap((value) => String(value).split(/\s+/g));
+
+    for (const id of ids) {
+      addRoot(document.getElementById?.(id.replace(/^#/, "")));
+    }
+
+    const root = runtime?.root;
+    if (root?.matches?.('[role="listbox"]')) addRoot(root);
+
+    const adapterPopupSelectors = {
+      element: '.el-select-dropdown,.el-popper,.el-cascader-panel,.el-tree-select__popper,.el-autocomplete-suggestion',
+      ant: '.ant-select-dropdown,.ant-cascader-menus,.ant-tree-select-dropdown',
+      ivu: '.ivu-select-dropdown',
+      layui: '.layui-anim,.layui-form-select .layui-anim,.layui-select-none',
+      chosen: '.chosen-drop,.chosen-results',
+      select2: '.select2-dropdown,.select2-results,[id$="-results"]',
+      "generic-menu": '[class*="select-box-options"],[class*="drop-menu"],[class*="dropdown-menu"]',
+    };
+    const adapterPopupSelector = adapterPopupSelectors[adapter];
+    if (adapterPopupSelector) {
+      for (const node of Array.from(document.querySelectorAll?.(adapterPopupSelector) || [])) {
+        if (isVisible(node)) addRoot(node);
+      }
+      for (const node of Array.from(root?.querySelectorAll?.(adapterPopupSelector) || [])) {
+        addRoot(node);
+      }
+    }
+
+    const candidates = Array.from(
+      document.querySelectorAll?.(
+        '[role="listbox"],[class*="dropdown"],[class*="Dropdown"],[class*="select-menu"],[class*="SelectMenu"],[class*="menu"],[class*="Menu"],[class*="drop-menu"],[class*="DropMenu"],[class*="drop_menu"],[class*="dropmenu"],[class*="select-box-options"],[class*="select_box"],[class*="selectbox-options"],[class*="chosen-drop"],[class*="select2-results"],[class*="cascader-panel"],[class*="cascader-menus"],[class*="tree-select"],[class*="ant-select-dropdown"],[class*="ivu-select-dropdown"],[class*="autocomplete-suggestion"]'
+      ) || []
+    ).filter((node) => isVisible(node));
+
+    const triggerRect = trigger?.getBoundingClientRect?.();
+    candidates
+      .map((node) => {
+        const rect = node.getBoundingClientRect?.();
+        const distance =
+          triggerRect && rect
+            ? Math.abs(Number(rect.left || 0) - Number(triggerRect.left || 0)) +
+              Math.abs(Number(rect.top || 0) - Number(triggerRect.bottom || 0))
+            : Number.MAX_SAFE_INTEGER;
+        return { node, distance };
+      })
+      .sort((left, right) => left.distance - right.distance)
+      .slice(0, 8)
+      .forEach(({ node }) => addRoot(node));
+
+    if (root && root !== trigger) addRoot(root);
+    return roots;
+  }
+
+  function collectVisibleCustomDropdownOptions(runtime) {
+    const options = [];
+    const seenElements = new Set();
+    const seenLabels = new Set();
+
+    for (const popupRoot of getCustomDropdownPopupRoots(runtime)) {
+      const nodes = [];
+      if (popupRoot.matches?.(CUSTOM_DROPDOWN_OPTION_SELECTOR)) {
+        nodes.push(popupRoot);
+      }
+      nodes.push(
+        ...Array.from(
+          popupRoot.querySelectorAll?.(CUSTOM_DROPDOWN_OPTION_SELECTOR) || []
+        )
+      );
+
+      for (const node of nodes) {
+        if (seenElements.has(node) || !isVisible(node)) continue;
+        if (
+          node.getAttribute?.("aria-disabled") === "true" ||
+          node.getAttribute?.("data-disabled") === "true" ||
+          /(^|[\s_-])(?:disabled|is-disabled|layui-disabled)([\s_-]|$)/i.test(String(node.className || ""))
+        ) {
+          continue;
+        }
+        const label = getCustomDropdownOptionLabel(node);
+        if (!label || seenLabels.has(label)) continue;
+
+        const nodeIsOption = node.matches?.(
+          '[role="option"],[class*="option"],[class*="Option"],[class*="active-result"],[class*="cascader-node"],[class*="tree-node"],[class*="select-item"]'
+        );
+        const nestedOption = !nodeIsOption && node.querySelector?.(
+          '[role="option"],[class*="option"],[class*="Option"]'
+        );
+        if (nestedOption && isVisible(nestedOption)) continue;
+
+        seenElements.add(node);
+        seenLabels.add(label);
+        const clickTarget =
+          node.querySelector?.(
+            '[class*="Menu-container"],[class*="menu-container"],[role="option"]'
+          ) || node;
+        options.push({
+          el: node,
+          clickTarget,
+          label,
+          value:
+            node.getAttribute?.("data-value") ||
+            node.getAttribute?.("data-option-value") ||
+            node.getAttribute?.("lay-value") ||
+            node.getAttribute?.("data-code") ||
+            node.getAttribute?.("data-option-array-index") ||
+            node.getAttribute?.("data-select2-id") ||
+            node.getAttribute?.("value") ||
+            label,
+        });
+      }
+    }
+
+    return options.slice(0, 100);
+  }
+
+  async function waitForCustomDropdownOptions(runtime, timeoutMs = 900) {
+    const start = Date.now();
+    let options = collectVisibleCustomDropdownOptions(runtime);
+    while (options.length === 0 && Date.now() - start < timeoutMs) {
+      await sleep(60);
+      options = collectVisibleCustomDropdownOptions(runtime);
+    }
+    return options;
+  }
+
+  function customDropdownSelectionLooksCommitted(runtime, desired, option) {
+    const desiredCandidates = Array.isArray(desired) ? desired : [desired];
+    if (getCustomDropdownCurrentTexts(runtime).some((current) =>
+      desiredCandidates.some((candidate) => getMatchScore(current, candidate) >= 60)
+    )) {
+      return true;
+    }
+
+    const optionClass = String(option?.el?.className || "");
+    if (
+      option?.el?.getAttribute?.("aria-selected") === "true" ||
+      /(^|[\s_-])(selected|active)([\s_-]|$)/i.test(optionClass)
+    ) {
+      return true;
+    }
+
+    return !isVisible(option?.el);
+  }
+
+  function getCustomDropdownOpenTriggers(runtime) {
+    const triggers = [];
+    const seen = new Set();
+    const add = (node) => {
+      if (!node || seen.has(node)) return;
+      seen.add(node);
+      triggers.push(node);
+    };
+
+    const control = runtime?.el;
+    const root = runtime?.root || findCustomDropdownRoot(control);
+    const adapter = getCustomDropdownAdapter(control || runtime?.trigger);
+    add(runtime?.trigger);
+    add(control);
+
+    const selectors = {
+      element: '.el-select__wrapper,.el-select .el-input__inner,.el-select__caret,.el-input__inner,.el-autocomplete .el-input__inner',
+      ant: '.ant-select-selector,.ant-select-selection-search-input,.ant-select-arrow',
+      ivu: '.ivu-select-selection,.ivu-select-input,.ivu-select-arrow',
+      layui: '.layui-select-title input,.layui-select-title,.layui-edge',
+      chosen: '.chosen-single,.chosen-choices',
+      select2: '.select2-selection,[role="combobox"]',
+      "generic-menu": '[class*="select-box"],[class*="select_box"],[class*="selectbox"],[class*="selectBox"],[class*="drop-menu"],[class*="drop_menu"],[class*="dropmenu"],[class*="dropdown-select"],[class*="bootstrap-select"],[class*="bs-select"]',
+    };
+    const selector = selectors[adapter];
+    if (selector) {
+      for (const node of Array.from(root?.querySelectorAll?.(selector) || [])) add(node);
+    }
+
+    const arrow = root?.querySelector?.(
+      '[class*="Select-arrow"],[class*="select-arrow"],[class*="Select-icon"],[class*="select-icon"],[class*="caret"],[class*="arrow"]'
+    );
+    add(arrow);
+    return triggers;
+  }
+
+  async function selectCustomDropdownOption(runtime, desired) {
+    const values = getCustomDropdownDesiredValues(runtime, desired);
+    if (values.length === 0) return false;
+
+    // Single selects should consume one value even if the model returned an
+    // array. Multi-select widgets keep the menu open (or can be reopened) so
+    // every requested value is selected and verified independently.
+    const targets =
+      isCustomDropdownMultiSelect(runtime) || isCustomDropdownCascader(runtime)
+        ? values
+        : values.slice(0, 1);
+    let completed = 0;
+
+    for (const text of targets) {
+      let options = collectVisibleCustomDropdownOptions(runtime);
+      let best = pickBestOption(options, text);
+
+      if (!best) {
+        for (const trigger of getCustomDropdownOpenTriggers(runtime)) {
+          clickLikeUser(trigger);
+          options = await waitForCustomDropdownOptions(runtime, 1400);
+          best = pickBestOption(options, text);
+          if (best) break;
+        }
+      }
+
+      if (!best && runtime?.el?.tagName?.toLowerCase?.() === "input" && !runtime.el.readOnly) {
+        const previousValue = String(runtime.el.value || "");
+        setNativeValue(runtime.el, text);
+        runtime.el.dispatchEvent(new Event("input", { bubbles: true }));
+        options = await waitForCustomDropdownOptions(runtime, 1400);
+        best = pickBestOption(options, text);
+        if (!best) {
+          setNativeValue(runtime.el, previousValue);
+          runtime.el.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+      }
+
+      if (!best) return completed > 0 && completed === targets.length;
+
+      clickLikeUser(best.clickTarget || best.el);
+      // Vue/React controlled inputs and older recruitment widgets sometimes
+      // listen on the trigger rather than the option node.
+      for (const eventName of ["input", "change"]) {
+        try {
+          runtime?.el?.dispatchEvent?.(new Event(eventName, { bubbles: true }));
+        } catch (_) {
+          // A non-DOM test double or a framework host may not expose events.
+        }
+      }
+      await sleep(120);
+      let committed = customDropdownSelectionLooksCommitted(runtime, text, best);
+
+      if (!committed && best.clickTarget && best.clickTarget !== best.el) {
+        clickLikeUser(best.el);
+        await sleep(120);
+        committed = customDropdownSelectionLooksCommitted(runtime, text, best);
+      }
+
+      if (!committed) {
+        try {
+          (best.clickTarget || best.el)?.dispatchEvent?.(
+            new KeyboardEvent("keydown", { key: "Enter", bubbles: true })
+          );
+          await sleep(120);
+          committed = customDropdownSelectionLooksCommitted(runtime, text, best);
+        } catch (_) {
+          // KeyboardEvent is unavailable in a few embedded webviews.
+        }
+      }
+
+      if (!committed) return false;
+      try {
+        runtime?.el?.dispatchEvent?.(new Event("blur", { bubbles: true }));
+      } catch (_) {
+        // Ignore hosts that do not expose DOM event constructors.
+      }
+      completed += 1;
+    }
+
+    return completed === targets.length;
   }
 
   async function safeCheck(inputEl, checked) {
@@ -2201,11 +3733,24 @@
     let fuzzy = null;
 
     for (const option of options || []) {
-      const label = String(option.label || option.value || "").trim();
-      if (!label) continue;
+      // Native selects and framework controls frequently expose an opaque
+      // value (for example `01`) while displaying a human label (for example
+      // `本科`). Match both representations so the AI can return either one.
+      const optionTexts = [
+        option.label,
+        option.value,
+        option.text,
+        option.code,
+        option.id,
+      ]
+        .map((item) => String(item ?? "").trim())
+        .filter(Boolean);
+      if (optionTexts.length === 0) continue;
 
       for (const candidate of candidates) {
-        const score = getMatchScore(label, candidate);
+        const score = Math.max(
+          ...optionTexts.map((optionText) => getMatchScore(optionText, candidate))
+        );
         if (score >= 100) {
           exact = option;
           break;
@@ -2378,6 +3923,18 @@
       required: Boolean(field.required),
       sectionKey: normalizeCacheText(field.sectionKey || ""),
       sectionLabel: normalizeCacheText(field.sectionLabel || ""),
+      groupId: normalizeCacheText(field.groupId || ""),
+      groupLabel: normalizeCacheText(field.groupLabel || ""),
+      groupIndex: Number.isFinite(Number(field.groupIndex)) ? Number(field.groupIndex) : null,
+      groupFieldLabels: Array.isArray(field.groupFieldLabels)
+        ? field.groupFieldLabels.map((item) => normalizeCacheText(item)).filter(Boolean).slice(0, 12)
+        : [],
+      groupPath: Array.isArray(field.groupPath)
+        ? field.groupPath
+            .map((item) => `${normalizeCacheText(item?.label || "")}:${normalizeCacheText(item?.kind || "")}:${item?.index ?? ""}`)
+            .filter(Boolean)
+            .slice(0, 6)
+        : [],
       label: normalizeCacheText(field.label || ""),
       placeholder: normalizeCacheText(field.placeholder || ""),
       name: normalizeCacheText(field.name || ""),
@@ -2519,6 +4076,12 @@
       changes.push(
         `section ${previous?.sectionLabel || "(empty)"} -> ${current?.sectionLabel || "(empty)"}`
       );
+    }
+    if ((previous?.groupLabel || "") !== (current?.groupLabel || "")) {
+      changes.push(`group ${previous?.groupLabel || "(empty)"} -> ${current?.groupLabel || "(empty)"}`);
+    }
+    if (Number(previous?.groupIndex ?? 0) !== Number(current?.groupIndex ?? 0)) {
+      changes.push(`groupIndex ${previous?.groupIndex ?? "(empty)"} -> ${current?.groupIndex ?? "(empty)"}`);
     }
     if ((previous?.label || "") !== (current?.label || "")) {
       changes.push(`label ${previous?.label || "(empty)"} -> ${current?.label || "(empty)"}`);

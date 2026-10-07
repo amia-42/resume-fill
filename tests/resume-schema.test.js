@@ -43,6 +43,44 @@ test("resume schema exposes campus recruiting education and experience fields", 
   assert.equal("advisor" in template.educations[0], true);
 });
 
+test("resume schema exposes and normalizes family member records", () => {
+  const schema = loadResumeSchema();
+  const catalog = schema.getFieldCatalog({ mode: "max" });
+  const template = JSON.parse(schema.createImportTemplateString());
+
+  assert.ok(Array.isArray(template.familyMembers));
+  assert.equal(template.familyMembers.length, 8);
+  assert.equal(template.familyMembers[0].name, "");
+  assert.ok(catalog.some((field) => field.path === "familyMembers.0.name"));
+  assert.ok(catalog.some((field) => field.path === "familyMembers.0.relationship"));
+  assert.ok(catalog.some((field) => field.path === "familyMembers.0.position"));
+
+  const normalized = schema.normalizeResumeProfile({
+    familyMembers: [
+      {
+        memberName: "李四",
+        relation: "父亲",
+        memberAge: 52,
+        telephone: 13700137000,
+        workUnit: "某科技公司",
+        job: "工程师",
+        location: "杭州",
+        description: ["直系亲属", "同住"],
+      },
+    ],
+  });
+
+  assert.equal(normalized.familyMembers.length, 1);
+  assert.equal(normalized.familyMembers[0].name, "李四");
+  assert.equal(normalized.familyMembers[0].relationship, "父亲");
+  assert.equal(normalized.familyMembers[0].age, "52");
+  assert.equal(normalized.familyMembers[0].phone, "13700137000");
+  assert.equal(normalized.familyMembers[0].company, "某科技公司");
+  assert.equal(normalized.familyMembers[0].position, "工程师");
+  assert.equal(normalized.familyMembers[0].city, "杭州");
+  assert.equal(normalized.familyMembers[0].notes, "直系亲属, 同住");
+});
+
 test("resume schema normalizes campus recruiting resume data", () => {
   const schema = loadResumeSchema();
   const normalized = schema.normalizeResumeProfile({
@@ -93,6 +131,10 @@ test("resume schema normalizes campus recruiting resume data", () => {
 
 test("resume schema supports user-defined custom fields inside group sections", () => {
   const schema = loadResumeSchema();
+  const manyCustomFields = Array.from({ length: 20 }, (_, index) => ({
+    name: `字段${index + 1}`,
+    value: `值${index + 1}`,
+  }));
   const normalized = schema.normalizeResumeProfile({
     personal: {
       fullName: "张三",
@@ -103,6 +145,7 @@ test("resume schema supports user-defined custom fields inside group sections", 
       ],
       unknownKey: "dropped",
     },
+    skills: { customFields: manyCustomFields },
   });
 
   assert.equal(Array.isArray(normalized.personal.customFields), true);
@@ -114,16 +157,17 @@ test("resume schema supports user-defined custom fields inside group sections", 
   assert.equal("unknownKey" in normalized.personal, false);
   assert.equal(Array.isArray(normalized.skills.customFields), true);
 
-  const maxCatalog = schema.getFieldCatalog({ mode: "max" });
+  assert.equal(normalized.skills.customFields.length, 20);
+
+  const maxCatalog = schema.getFieldCatalog({ mode: "max", profile: normalized });
   assert.ok(
     maxCatalog.some((field) => field.path === "personal.customFields.0.value")
   );
   assert.ok(
     !maxCatalog.some((field) => field.path === "personal.customFields.0.name")
   );
-  assert.ok(
-    maxCatalog.some((field) => field.path === "skills.customFields.11.value")
-  );
+  assert.ok(maxCatalog.some((field) => field.path === "skills.customFields.19.value"));
+  assert.ok(!maxCatalog.some((field) => field.path === "skills.customFields.20.value"));
 
   const withValues = schema.getCatalogWithValues(normalized);
   const customEntry = withValues.find(

@@ -94,10 +94,36 @@
             <button class="btn btn-outline btn-lg" id="startSelectionFillBtn">
               <span id="startSelectionFillBtnText">选区填入</span>
             </button>
+            <button class="btn btn-outline btn-lg" id="startAdaptiveFillBtn">
+              <span id="startAdaptiveFillBtnText">自适应选区</span>
+            </button>
+            <button class="btn btn-outline btn-lg" id="startAdaptivePageFillBtn">
+              <span id="startAdaptivePageFillBtnText">自适应整页</span>
+            </button>
+            <div class="fill-options" role="group" aria-label="填入选项">
+              <label class="switch-option" for="overwriteExistingToggle">
+                <input type="checkbox" id="overwriteExistingToggle" />
+                <span>覆盖已有字段</span>
+              </label>
+            </div>
             <button class="btn btn-outline btn-lg" id="clearMappingCacheBtn">
               清理映射缓存
             </button>
             <div class="tip" id="fillTip" hidden></div>
+            <section class="unmapped-fields-panel" id="unmappedFieldsPanel" hidden aria-labelledby="unmappedFieldsTitle">
+              <div class="section-header section-header-normal">
+                <span id="unmappedFieldsTitle">本次未匹配字段</span>
+                <span class="unmapped-fields-count" id="unmappedFieldsCount"></span>
+              </div>
+              <div class="tip">
+                选择需要保留到标准简历模板的字段，AI 会推荐所属模块；无法判断时会放入“补充信息”。
+              </div>
+              <div class="unmapped-fields-list" id="unmappedFieldsList" role="group" aria-label="未匹配字段列表"></div>
+              <div class="unmapped-fields-actions">
+                <button class="btn btn-primary btn-sm" id="addSelectedUnmappedBtn" disabled>AI 推荐模块并添加</button>
+                <span class="unmapped-fields-status" id="unmappedFieldsStatus" aria-live="polite"></span>
+              </div>
+            </section>
           </div>
         </section>
 
@@ -254,6 +280,30 @@
               </svg>
               <span>添加自定义模型</span>
             </button>
+
+            <section class="danger-mode-section" aria-labelledby="dangerModeTitle">
+              <div class="section-header section-header-normal">
+                <span id="dangerModeTitle">危险模式</span>
+              </div>
+              <label class="switch-option danger-mode-option" for="dangerModeToggle">
+                <input type="checkbox" id="dangerModeToggle" />
+                <span>允许两次失败后执行 AI 生成的填入脚本</span>
+              </label>
+              <div class="tip danger-mode-tip">
+                默认关闭。开启后，仅在一次填入连续两次失败时，AI 才能为当前控件生成一次受限脚本；脚本不会自动提交表单。
+              </div>
+            </section>
+
+            <section class="capabilities-section" aria-labelledby="capabilitiesTitle">
+              <div class="section-header section-header-normal">
+                <span id="capabilitiesTitle">现有支持的控件类型</span>
+                <span class="capabilities-count" id="capabilitiesCount"></span>
+              </div>
+              <div class="tip capabilities-tip">
+                自适应填入可选择选区或整页扫描。AI 会先阅读控件结构；填写失败时会分析控件并尝试适配，成功后自动记住该控件类型。
+              </div>
+              <div class="capabilities-list" id="supportedControlTypes" role="list"></div>
+            </section>
           </div>
         </div>
       </div>
@@ -381,6 +431,7 @@
     <script src="shared/log-export.js"></script>
     <script src="shared/log-visibility.js"></script>
     <script src="shared/content-bridge.js"></script>
+    <script src="shared/control-capabilities.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

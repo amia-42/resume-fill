@@ -23,8 +23,23 @@ const startSelectionFillBtn = document.getElementById("startSelectionFillBtn");
 const startSelectionFillBtnText = document.getElementById(
   "startSelectionFillBtnText"
 );
+const startAdaptiveFillBtn = document.getElementById("startAdaptiveFillBtn");
+const startAdaptiveFillBtnText = document.getElementById(
+  "startAdaptiveFillBtnText"
+);
+const startAdaptivePageFillBtn = document.getElementById("startAdaptivePageFillBtn");
+const startAdaptivePageFillBtnText = document.getElementById(
+  "startAdaptivePageFillBtnText"
+);
+const overwriteExistingToggle = document.getElementById("overwriteExistingToggle");
+const dangerModeToggle = document.getElementById("dangerModeToggle");
 const clearMappingCacheBtn = document.getElementById("clearMappingCacheBtn");
 const fillTipEl = document.getElementById("fillTip");
+const unmappedFieldsPanel = document.getElementById("unmappedFieldsPanel");
+const unmappedFieldsCountEl = document.getElementById("unmappedFieldsCount");
+const unmappedFieldsListEl = document.getElementById("unmappedFieldsList");
+const addSelectedUnmappedBtn = document.getElementById("addSelectedUnmappedBtn");
+const unmappedFieldsStatusEl = document.getElementById("unmappedFieldsStatus");
 
 const resumeNavEl = document.getElementById("resumeNav");
 const resumeFormHost = document.getElementById("resumeFormHost");
@@ -67,6 +82,8 @@ const closeSettingsBtn = document.getElementById("closeSettingsBtn");
 const closeSettingsBackdrop = document.getElementById("closeSettingsBackdrop");
 const modelList = document.getElementById("modelList");
 const addModelBtn = document.getElementById("addModelBtn");
+const supportedControlTypesEl = document.getElementById("supportedControlTypes");
+const capabilitiesCountEl = document.getElementById("capabilitiesCount");
 
 const editModelModal = document.getElementById("editModelModal");
 const closeEditBtn = document.getElementById("closeEditBtn");
@@ -120,11 +137,14 @@ if (!contentBridge) {
   throw new Error("Resume content bridge is not available");
 }
 
+const controlCapabilities = window.ResumeControlCapabilities;
+
 const RESUME_TEMPLATES_KEY = resumeStorage.keys.templates;
 const RESUME_ACTIVE_TEMPLATE_KEY = resumeStorage.keys.activeTemplateId;
 const RESUME_LEGACY_PROFILE_KEY = resumeStorage.keys.profile;
 const RESUME_LEGACY_RAW_TEXT_KEY = resumeStorage.keys.rawText;
 const MAPPING_CACHE_KEY = "fieldMappingCacheV3";
+const FILL_OPTIONS_KEY = "fillOptionsV1";
 
 const BUILTIN_MODEL = modelStorage.DEFAULT_MODEL;
 
@@ -140,6 +160,7 @@ let templateNameMode = null;
 const collapsedResumeSections = new Set();
 let logProjectRootHandle = null;
 let activeFillSession = null;
+let pendingUnmappedFields = [];
 
 const FILL_ACTIONS = {
   overwritePage: {
@@ -169,6 +190,28 @@ const FILL_ACTIONS = {
     fillMode: "overwrite",
     scope: "selection",
   },
+  adaptiveSelection: {
+    triggerText: "自适应选区",
+    runningText: "自适应中...",
+    statusText: "读取控件并决策...",
+    startLog: "准备自适应填入：请框选区域，AI 将判断是否填入并识别控件类型。",
+    doneLog: "自适应选区填入完成",
+    fillMode: "adaptive",
+    scope: "selection",
+    adaptiveScope: "selection",
+    adaptive: true,
+  },
+  adaptivePage: {
+    triggerText: "自适应整页",
+    runningText: "自适应整页中...",
+    statusText: "扫描整页控件并决策...",
+    startLog: "准备自适应整页填入：AI 将扫描当前页面并判断是否填入。",
+    doneLog: "自适应整页填入完成",
+    fillMode: "adaptive",
+    scope: "page",
+    adaptiveScope: "page",
+    adaptive: true,
+  },
 };
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -178,6 +221,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   initResumeEditorEvents();
   initTemplateEvents();
   await initModels();
+  await loadFillOptions();
+  await controlCapabilities?.loadPersisted?.();
+  renderSupportedControlTypes();
   await refreshLogExportStatus();
   await loadResumeProfile();
   updateStartFillAvailability();
@@ -189,9 +235,22 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     !changes[RESUME_TEMPLATES_KEY] &&
     !changes[RESUME_ACTIVE_TEMPLATE_KEY] &&
     !changes[RESUME_LEGACY_PROFILE_KEY] &&
-    !changes[RESUME_LEGACY_RAW_TEXT_KEY]
+    !changes[RESUME_LEGACY_RAW_TEXT_KEY] &&
+    !changes[
+      controlCapabilities?.STORAGE_KEY ||
+        controlCapabilities?.storageKey ||
+        "__no_capability_key__"
+    ]
   ) {
     return;
+  }
+
+  const capabilityStorageKey =
+    controlCapabilities?.STORAGE_KEY ||
+    controlCapabilities?.storageKey ||
+    "__no_capability_key__";
+  if (changes[capabilityStorageKey]) {
+    controlCapabilities?.loadPersisted?.().then(() => renderSupportedControlTypes());
   }
 
   if (isResumeDirty || isImporting || isFilling) {
@@ -416,10 +475,67 @@ async function finalizeFillSession({ status, stats, errorMessage = "" } = {}) {
 function openModal() {
   settingsModal.classList.add("open");
   renderModelList();
+  renderSupportedControlTypes();
 }
 
 function closeModal() {
   settingsModal.classList.remove("open");
+}
+
+function renderSupportedControlTypes() {
+  if (!supportedControlTypesEl) return;
+
+  const entries =
+    typeof controlCapabilities?.getAll === "function"
+      ? controlCapabilities.getAll()
+      : [];
+  const supported = entries.filter((entry) => entry.supported !== false);
+  const unsupported = entries.filter((entry) => entry.supported === false);
+
+  if (capabilitiesCountEl) {
+    capabilitiesCountEl.textContent = supported.length
+      ? `${supported.length} 种已支持`
+      : "未加载";
+  }
+
+  if (!entries.length) {
+    supportedControlTypesEl.innerHTML =
+      '<div class="capabilities-empty">控件能力目录暂时不可用，请重新打开设置。</div>';
+    return;
+  }
+
+  supportedControlTypesEl.innerHTML = entries
+    .map((entry) => {
+      const isSupported = entry.supported !== false;
+      const statusLabel = isSupported
+        ? "已支持"
+        : entry.adaptable === false
+          ? "暂不支持"
+          : "需 AI 适配";
+      const kind = escapeHtml(entry.kind || "unknown");
+      const inputTypes = Array.isArray(entry.inputTypes)
+        ? entry.inputTypes.join("、")
+        : "";
+      return `
+        <div class="capability-item ${isSupported ? "is-supported" : "is-unsupported"}" role="listitem">
+          <div class="capability-main">
+            <span class="capability-label">${escapeHtml(entry.label || kind)}</span>
+            <span class="capability-kind">${kind}</span>
+          </div>
+          <span class="capability-status">${statusLabel}</span>
+          <div class="capability-meta">${escapeHtml(inputTypes)}</div>
+        </div>
+      `;
+    })
+    .join("");
+
+  // Keep this explicit so future catalog entries can omit `supported` without
+  // making the settings panel claim that every browser control is handled.
+  if (unsupported.length && capabilitiesCountEl) {
+    capabilitiesCountEl.title = `暂不支持：${unsupported
+      .map((entry) => entry.label || entry.kind)
+      .join("、")}`;
+  }
 }
 
 function openEditModal(modelId = null) {
@@ -1163,7 +1279,8 @@ function renderSectionCustomFields(section, profile) {
   addBtn.className = "btn-text resume-custom-fields-add";
   addBtn.dataset.customAdd = section.key;
   addBtn.textContent = "+ 添加自定义字段";
-  addBtn.disabled = rows.length >= schema.customFieldSlots;
+  // 自定义字段没有数量上限，按钮始终可继续添加。
+  addBtn.disabled = false;
 
   headEl.appendChild(titleEl);
   headEl.appendChild(addBtn);
@@ -1172,7 +1289,7 @@ function renderSectionCustomFields(section, profile) {
   const hintEl = document.createElement("div");
   hintEl.className = "resume-custom-fields-hint";
   hintEl.textContent =
-    "补充本区块没有的字段（如“生源地”“政治面貌”），会与标准字段一起参与 AI 字段映射。";
+    "补充本区块没有的字段（如“生源地”“政治面貌”），数量不设上限，会与标准字段一起参与 AI 字段映射。";
   host.appendChild(hintEl);
 
   for (let index = 0; index < rows.length; index += 1) {
@@ -1451,8 +1568,6 @@ function addSectionCustomField(sectionKey) {
   const nextProfile = syncResumeProfileFromForm();
   const group = { ...(nextProfile[sectionKey] || {}) };
   const rows = Array.isArray(group.customFields) ? [...group.customFields] : [];
-  if (rows.length >= schema.customFieldSlots) return;
-
   rows.push({ name: "", value: "" });
   group.customFields = rows;
   nextProfile[sectionKey] = group;
@@ -1691,6 +1806,64 @@ startSelectionFillBtn?.addEventListener("click", async () => {
   await runFill("selection");
 });
 
+startAdaptiveFillBtn?.addEventListener("click", async () => {
+  await runFill("adaptiveSelection");
+});
+
+startAdaptivePageFillBtn?.addEventListener("click", async () => {
+  await runFill("adaptivePage");
+});
+
+addSelectedUnmappedBtn?.addEventListener("click", async () => {
+  await recommendAndAddSelectedUnmappedFields();
+});
+
+overwriteExistingToggle?.addEventListener("change", async () => {
+  await saveFillOptions();
+});
+
+dangerModeToggle?.addEventListener("change", async () => {
+  await saveFillOptions();
+});
+
+async function loadFillOptions() {
+  if (!overwriteExistingToggle && !dangerModeToggle) return;
+  try {
+    const result = await chrome.storage.local.get(FILL_OPTIONS_KEY);
+    const options = result?.[FILL_OPTIONS_KEY] || {};
+    if (overwriteExistingToggle) {
+      overwriteExistingToggle.checked = options.overwriteExisting === true;
+    }
+    if (dangerModeToggle) {
+      // The dangerous setting is opt-in and remains off for existing installs.
+      dangerModeToggle.checked = options.dangerMode === true ||
+        result?.dangerMode === true ||
+        result?.dangerousMode === true;
+    }
+  } catch (_) {
+    if (overwriteExistingToggle) overwriteExistingToggle.checked = false;
+    if (dangerModeToggle) dangerModeToggle.checked = false;
+  }
+}
+
+async function saveFillOptions() {
+  if (!overwriteExistingToggle && !dangerModeToggle) return;
+  try {
+    const dangerMode = dangerModeToggle?.checked === true;
+    await chrome.storage.local.set({
+      [FILL_OPTIONS_KEY]: {
+        overwriteExisting: overwriteExistingToggle?.checked === true,
+        dangerMode,
+      },
+      // Keep a flat key for content scripts injected by an older popup.
+      dangerMode,
+      dangerousMode: dangerMode,
+    });
+  } catch (error) {
+    console.warn("[popup] 保存填入选项失败:", error);
+  }
+}
+
 async function runFill(actionKey) {
   if (isFilling) return;
 
@@ -1738,6 +1911,7 @@ async function runFill(actionKey) {
   isFilling = true;
   updateFillActionButtons({ isRunning: true, runningActionKey: actionKey });
   fillTipEl.hidden = true;
+  renderUnmappedFields([]);
   updateStatus("running", actionConfig.statusText);
   beginFillSession(tab);
   addLog("info", actionConfig.startLog);
@@ -1755,6 +1929,16 @@ async function runFill(actionKey) {
       resumeProfile,
       fillMode: actionConfig.fillMode,
       scope: actionConfig.scope,
+      adaptive: actionConfig.adaptive === true,
+      adaptiveScope: actionConfig.adaptiveScope || actionConfig.scope,
+      overwriteExisting:
+        actionConfig.adaptive === true
+          ? overwriteExistingToggle?.checked === true
+          : actionConfig.fillMode !== "incremental",
+      // The dangerous fallback switch is owned by the settings UI; an absent
+      // control safely resolves to false for older popup builds.
+      dangerMode: dangerModeToggle?.checked === true,
+      dangerousMode: dangerModeToggle?.checked === true,
     });
 
     if (!response?.success) {
@@ -1779,6 +1963,7 @@ async function runFill(actionKey) {
 
     fillTipEl.textContent = buildFillTipText(actionKey, response.cacheHit);
     fillTipEl.hidden = false;
+    renderUnmappedFields(response.unmappedFields || []);
 
     addLog(
       "success",
@@ -1804,6 +1989,250 @@ async function runFill(actionKey) {
   } finally {
     isFilling = false;
     updateStartFillAvailability();
+  }
+}
+
+function renderUnmappedFields(fields) {
+  pendingUnmappedFields = Array.isArray(fields)
+    ? fields
+        .map((field) => ({
+          ...field,
+          fieldId: String(field?.fieldId || "").trim(),
+          label: String(field?.label || "").trim(),
+        }))
+        .filter((field) => field.fieldId)
+    : [];
+
+  if (!unmappedFieldsPanel || !unmappedFieldsListEl) return;
+
+  if (!pendingUnmappedFields.length) {
+    unmappedFieldsPanel.hidden = true;
+    unmappedFieldsListEl.innerHTML = "";
+    if (unmappedFieldsStatusEl) unmappedFieldsStatusEl.textContent = "";
+    if (addSelectedUnmappedBtn) addSelectedUnmappedBtn.disabled = true;
+    return;
+  }
+
+  unmappedFieldsPanel.hidden = false;
+  if (unmappedFieldsCountEl) {
+    unmappedFieldsCountEl.textContent = `${pendingUnmappedFields.length} 个`;
+  }
+  if (unmappedFieldsStatusEl) {
+    unmappedFieldsStatusEl.textContent = "可选择后加入标准简历模板";
+  }
+
+  unmappedFieldsListEl.innerHTML = pendingUnmappedFields
+    .map((field) => {
+      const label = field.label || field.placeholder || field.fieldId;
+      const meta = [field.groupLabel || field.sectionLabel, field.kind]
+        .filter(Boolean)
+        .join(" · ");
+      return `
+        <label class="unmapped-field-option">
+          <input type="checkbox" data-unmapped-field-id="${escapeHtml(field.fieldId)}" />
+          <span class="unmapped-field-copy">
+            <span class="unmapped-field-label">${escapeHtml(label)}</span>
+            ${meta ? `<span class="unmapped-field-meta">${escapeHtml(meta)}</span>` : ""}
+          </span>
+        </label>
+      `;
+    })
+    .join("");
+
+  unmappedFieldsListEl.querySelectorAll("input[data-unmapped-field-id]").forEach((input) => {
+    input.addEventListener("change", updateUnmappedSelectionState);
+  });
+  updateUnmappedSelectionState();
+}
+
+function getSelectedUnmappedFields() {
+  if (!unmappedFieldsListEl) return [];
+  const ids = new Set(
+    Array.from(unmappedFieldsListEl.querySelectorAll("input[data-unmapped-field-id]:checked"))
+      .map((input) => String(input.dataset.unmappedFieldId || ""))
+      .filter(Boolean)
+  );
+  return pendingUnmappedFields.filter((field) => ids.has(field.fieldId));
+}
+
+function updateUnmappedSelectionState() {
+  const selectedCount = getSelectedUnmappedFields().length;
+  if (addSelectedUnmappedBtn) {
+    addSelectedUnmappedBtn.disabled = isFilling || selectedCount === 0;
+    addSelectedUnmappedBtn.textContent = selectedCount
+      ? `AI 推荐模块并添加（${selectedCount}）`
+      : "AI 推荐模块并添加";
+  }
+}
+
+function getUnmappedCandidateModules() {
+  return schema.sections
+    .filter((section) => section.type === "group")
+    .map((section) => ({
+      sectionKey: section.key,
+      label: section.label,
+      fields: (section.fields || []).map((field) => field.label).filter(Boolean),
+    }));
+}
+
+function normalizeUnmappedRecommendations(rawRecommendations, selectedFields, candidateModules) {
+  const selectedById = new Map(selectedFields.map((field) => [field.fieldId, field]));
+  const moduleKeys = new Set(candidateModules.map((module) => module.sectionKey));
+  const fallbackSectionKey = moduleKeys.has("additional") ? "additional" : candidateModules[0]?.sectionKey;
+  const rawById = new Map();
+
+  for (const item of Array.isArray(rawRecommendations) ? rawRecommendations : []) {
+    const fieldId = String(item?.fieldId || "").trim();
+    if (!selectedById.has(fieldId) || rawById.has(fieldId)) continue;
+    const requestedSection = String(item?.sectionKey || "").trim();
+    const sectionKey = moduleKeys.has(requestedSection) ? requestedSection : fallbackSectionKey;
+    const field = selectedById.get(fieldId);
+    const fieldName = String(item?.fieldName || field?.label || field?.placeholder || fieldId)
+      .trim()
+      .replace(/[\r\n]+/g, " ")
+      .slice(0, 60);
+    if (!fieldName || !sectionKey) continue;
+    rawById.set(fieldId, {
+      fieldId,
+      sectionKey,
+      fieldName,
+      reason: String(item?.reason || "").trim().slice(0, 240),
+    });
+  }
+
+  return selectedFields.map((field) => rawById.get(field.fieldId) || {
+    fieldId: field.fieldId,
+    sectionKey: fallbackSectionKey,
+    fieldName: String(field.label || field.placeholder || field.fieldId)
+      .trim()
+      .replace(/[\r\n]+/g, " ")
+      .slice(0, 60),
+    reason: "AI 未能判断合适模块，已放入补充信息",
+  }).filter((item) => item.fieldName && item.sectionKey);
+}
+
+async function recommendAndAddSelectedUnmappedFields() {
+  const selectedFields = getSelectedUnmappedFields();
+  if (!selectedFields.length || isFilling) return;
+
+  const activeModel = await getActiveModel();
+  const candidateModules = getUnmappedCandidateModules();
+  const fallbackSectionKey = candidateModules.some((module) => module.sectionKey === "additional")
+    ? "additional"
+    : candidateModules[0]?.sectionKey;
+  if (!fallbackSectionKey) {
+    addLog("error", "当前标准简历没有可添加自定义字段的模块");
+    return;
+  }
+
+  addSelectedUnmappedBtn.disabled = true;
+  if (unmappedFieldsStatusEl) unmappedFieldsStatusEl.textContent = "AI 正在推荐所属模块...";
+
+  const fallbackRecommendations = (reason) => selectedFields.map((field) => ({
+    fieldId: field.fieldId,
+    sectionKey: fallbackSectionKey,
+    fieldName: String(field.label || field.placeholder || field.fieldId)
+      .trim()
+      .replace(/[\r\n]+/g, " ")
+      .slice(0, 60),
+    reason,
+  }));
+
+  let recommendations;
+  if (!isModelConfigured(activeModel)) {
+    addLog("warning", "未配置模型，已将所选未映射字段放入补充信息");
+    recommendations = fallbackRecommendations("未配置模型，已使用补充信息兜底");
+  } else try {
+    const payload = {
+      mode: "unmapped_field_module_recommendation",
+      fields: selectedFields.map((field) => ({
+        fieldId: field.fieldId,
+        label: field.label,
+        kind: field.kind,
+        inputType: field.inputType,
+        placeholder: field.placeholder,
+        sectionKey: field.sectionKey,
+        sectionLabel: field.sectionLabel,
+        context: field.context,
+        nearbyLabels: field.nearbyLabels,
+        options: field.options,
+        groupLabel: field.groupLabel,
+        groupPath: field.groupPath,
+        groupFieldLabels: field.groupFieldLabels,
+      })),
+      candidateModules,
+      fallbackSectionKey,
+    };
+    const aiText = await aiClient.callAI(
+      activeModel.id,
+      JSON.stringify(payload),
+      "unmapped_field_module_recommendation"
+    );
+    const parsed = parseJsonFromAiText(aiText);
+    recommendations = normalizeUnmappedRecommendations(
+      parsed?.recommendations,
+      selectedFields,
+      candidateModules
+    );
+  } catch (error) {
+    addLog("warning", `AI 模块推荐失败，已将所选字段放入补充信息：${error.message}`);
+    recommendations = fallbackRecommendations("AI 推荐失败，已使用补充信息兜底");
+  }
+
+  try {
+    const nextProfile = syncResumeProfileFromForm();
+    const added = [];
+    const skipped = [];
+    for (const recommendation of recommendations || []) {
+      const section = schema.getSectionDefinition(recommendation.sectionKey);
+      const sectionKey = section?.type === "group" ? section.key : fallbackSectionKey;
+      const group = { ...(nextProfile[sectionKey] || {}) };
+      const rows = Array.isArray(group.customFields) ? [...group.customFields] : [];
+      const duplicate = rows.some(
+        (row) => String(row?.name || "").trim().toLowerCase() === recommendation.fieldName.toLowerCase()
+      );
+      if (duplicate) {
+        skipped.push(recommendation.fieldName);
+        continue;
+      }
+      rows.push({ name: recommendation.fieldName, value: "" });
+      group.customFields = rows;
+      nextProfile[sectionKey] = group;
+      added.push({ ...recommendation, sectionKey });
+    }
+
+    resumeProfile = schema.normalizeResumeProfile(nextProfile);
+    renderResumeEditor(resumeProfile);
+    await resumeStorage.saveTemplateContent(activeTemplateId, {
+      profile: resumeProfile,
+      schemaVersion: schema.version,
+      rawText: resumeImportTextEl.value.trim(),
+    });
+    isResumeDirty = false;
+    saveResumeBtn.disabled = true;
+    updateStartFillAvailability();
+
+    const addedIds = new Set(added.map((item) => item.fieldId));
+    pendingUnmappedFields = pendingUnmappedFields.filter((field) => !addedIds.has(field.fieldId));
+    renderUnmappedFields(pendingUnmappedFields);
+    switchTab("resume");
+    if (added[0]) openResumeSection(added[0].sectionKey, { scrollIntoView: true });
+    const moduleLabels = new Map(
+      schema.sections.map((section) => [section.key, section.label])
+    );
+    const recommendationSummary = added
+      .map((item) => `${item.fieldName}→${moduleLabels.get(item.sectionKey) || item.sectionKey}`)
+      .join("、")
+      .slice(0, 800);
+    addLog(
+      "success",
+      `已添加 ${added.length} 个未映射字段到标准简历模板${recommendationSummary ? `：${recommendationSummary}` : ""}${skipped.length ? `，跳过 ${skipped.length} 个重复字段` : ""}。`
+    );
+  } catch (error) {
+    addLog("error", `添加未映射字段失败：${error.message}`);
+    if (unmappedFieldsStatusEl) unmappedFieldsStatusEl.textContent = "添加失败，请重试";
+  } finally {
+    updateUnmappedSelectionState();
   }
 }
 
@@ -1846,6 +2275,16 @@ function updateFillActionButtons({
       button: startSelectionFillBtn,
       labelEl: startSelectionFillBtnText,
     },
+    {
+      key: "adaptiveSelection",
+      button: startAdaptiveFillBtn,
+      labelEl: startAdaptiveFillBtnText,
+    },
+    {
+      key: "adaptivePage",
+      button: startAdaptivePageFillBtn,
+      labelEl: startAdaptivePageFillBtnText,
+    },
   ];
 
   for (const item of buttonMap) {
@@ -1864,6 +2303,12 @@ function updateFillActionButtons({
 }
 
 function buildFillTipText(actionKey, cacheHit) {
+  if (actionKey === "adaptiveSelection" || actionKey === "adaptivePage") {
+    const scopeLabel = actionKey === "adaptiveSelection" ? "选区" : "整页";
+    const overwriteLabel = overwriteExistingToggle?.checked ? "覆盖已有字段" : "跳过已有字段";
+    return `自适应${scopeLabel}填入由 AI 阅读控件源码并做填入决策（${overwriteLabel}），未复用普通映射缓存。`;
+  }
+
   const modeLabel =
     actionKey === "incrementalPage"
       ? "增量填入"
@@ -1929,6 +2374,8 @@ async function injectContentScript(tabId) {
         "shared/field-semantics.js",
         "shared/fill-runtime.js",
         "shared/content-bridge.js",
+        "shared/control-capabilities.js",
+        "shared/field-groups.js",
         "shared/ai-client.js",
         "content.js",
       ],

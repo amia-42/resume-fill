@@ -79,3 +79,16 @@ test("buildTextFallbackValues converts month salary ranges to numeric fallback",
 
   assert.deepEqual(JSON.parse(JSON.stringify(fallbacks)), ["10000"]);
 });
+
+test("pickBestOption matches opaque option values used by recruitment widgets", () => {
+  const helpers = loadHelpers();
+  const option = helpers.pickBestOption(
+    [
+      { label: "本科", value: "03" },
+      { label: "硕士", value: "04" },
+    ],
+    "04"
+  );
+
+  assert.equal(option?.label, "硕士");
+});
