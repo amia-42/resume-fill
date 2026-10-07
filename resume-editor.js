@@ -606,7 +606,8 @@ function renderSectionCustomFields(section, profile) {
   addBtn.className = "btn-text resume-custom-fields-add";
   addBtn.dataset.customAdd = section.key;
   addBtn.textContent = "+ 添加自定义字段";
-  addBtn.disabled = rows.length >= schema.customFieldSlots;
+  // 自定义字段没有数量上限，按钮始终可继续添加。
+  addBtn.disabled = false;
 
   headEl.appendChild(titleEl);
   headEl.appendChild(addBtn);
@@ -615,7 +616,7 @@ function renderSectionCustomFields(section, profile) {
   const hintEl = document.createElement("div");
   hintEl.className = "resume-custom-fields-hint";
   hintEl.textContent =
-    "补充本区块没有的字段（如“生源地”“政治面貌”），会与标准字段一起参与 AI 字段映射。";
+    "补充本区块没有的字段（如“生源地”“政治面貌”），数量不设上限，会与标准字段一起参与 AI 字段映射。";
   host.appendChild(hintEl);
 
   for (let index = 0; index < rows.length; index += 1) {
@@ -899,8 +900,6 @@ function addSectionCustomField(sectionKey) {
   const nextProfile = syncResumeProfileFromForm();
   const group = { ...(nextProfile[sectionKey] || {}) };
   const rows = Array.isArray(group.customFields) ? [...group.customFields] : [];
-  if (rows.length >= schema.customFieldSlots) return;
-
   rows.push({ name: "", value: "" });
   group.customFields = rows;
   nextProfile[sectionKey] = group;

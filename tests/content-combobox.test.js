@@ -17,7 +17,11 @@ function loadComboboxHelpers() {
   const snippet = `
     const CUSTOM_DROPDOWN_CONTROL_SELECTOR = '[role="combobox"],[aria-haspopup="listbox"]';
     ${source.slice(start, end)}
-    module.exports = { isCustomDropdownElement, buildCustomDropdownRuntime };
+    module.exports = {
+      isCustomDropdownElement,
+      buildCustomDropdownRuntime,
+      getCustomDropdownAdapter,
+    };
   `;
   const context = {
     module: { exports: {} },
@@ -110,4 +114,65 @@ test("supports the sd dropdown option classes used by school selectors", () => {
 
   assert.match(source, /Select-common-item/);
   assert.match(source, /class\*="dropdown"/);
+});
+
+test("identifies common custom dropdown adapters", () => {
+  const helpers = loadComboboxHelpers();
+
+  assert.equal(
+    helpers.getCustomDropdownAdapter(
+      createElement({ className: "el-select el-select--default" })
+    ),
+    "element"
+  );
+  assert.equal(
+    helpers.getCustomDropdownAdapter(
+      createElement({ className: "layui-form-select" })
+    ),
+    "layui"
+  );
+  assert.equal(
+    helpers.getCustomDropdownAdapter(
+      createElement({ className: "chosen-container chosen-container-single" })
+    ),
+    "chosen"
+  );
+  assert.equal(
+    helpers.getCustomDropdownAdapter(
+      createElement({ className: "select2-selection select2-selection--single" })
+    ),
+    "select2"
+  );
+  assert.equal(
+    helpers.getCustomDropdownAdapter(
+      createElement({ className: "ant-select ant-select-single" })
+    ),
+    "ant"
+  );
+  assert.equal(
+    helpers.getCustomDropdownAdapter(
+      createElement({ className: "ivu-select ivu-select-single" })
+    ),
+    "ivu"
+  );
+  assert.equal(
+    helpers.getCustomDropdownAdapter(
+      createElement({ attrs: { "aria-controls": "city-list" }, readOnly: true })
+    ),
+    "readonly-popup"
+  );
+  assert.equal(
+    helpers.isCustomDropdownElement(
+      createElement({ className: "el-select el-select--default" }),
+      { label: "最高学历" }
+    ),
+    true
+  );
+  assert.equal(
+    helpers.isCustomDropdownElement(
+      createElement({ className: "selectBox" }),
+      { label: "工作城市" }
+    ),
+    true
+  );
 });

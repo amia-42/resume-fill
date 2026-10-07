@@ -129,6 +129,25 @@
       ],
     },
     {
+      key: "familyMembers",
+      label: "家庭成员情况",
+      type: "list",
+      initialItems: 1,
+      slots: 8,
+      itemLabel: "家庭成员",
+      note: "可填写父母、配偶、子女或其他直系亲属；没有的信息留空。",
+      fields: [
+        { key: "name", label: "姓名", input: "text", placeholder: "李四" },
+        { key: "relationship", label: "与本人关系", input: "text", placeholder: "父亲 / 母亲 / 配偶" },
+        { key: "age", label: "年龄", input: "text", placeholder: "52" },
+        { key: "phone", label: "联系电话", input: "tel", placeholder: "13700137000" },
+        { key: "company", label: "工作单位", input: "text", placeholder: "某公司 / 退休" },
+        { key: "position", label: "职位/职务", input: "text", placeholder: "工程师" },
+        { key: "city", label: "所在城市", input: "text", placeholder: "杭州" },
+        { key: "notes", label: "备注", input: "textarea", placeholder: "其他家庭情况说明" },
+      ],
+    },
+    {
       key: "identityAndAuthorization",
       label: "证件与资格",
       type: "group",
@@ -451,8 +470,9 @@
     },
   ];
 
-  // 每个 group 区块内可附加的自定义字段上限
-  const CUSTOM_FIELD_SLOTS = 12;
+  // 自定义字段不设数量上限。保留这个导出值只是为了兼容旧版编辑器
+  // 和第三方调用方；实际规范化与字段目录都按已有行数处理。
+  const CUSTOM_FIELD_SLOTS = Number.POSITIVE_INFINITY;
 
   const FIELD_VALUE_ALIASES = {
     personal: {
@@ -468,6 +488,16 @@
     },
     jobPreferences: {
       expectedSalary: ["expectedMonthlySalary", "expectedMonthSalary", "monthlySalary", "salaryExpectation", "期望月薪"],
+    },
+    familyMembers: {
+      name: ["memberName", "familyMemberName", "姓名", "家属姓名"],
+      relationship: ["relation", "kinship", "relationshipType", "关系", "与本人关系"],
+      age: ["memberAge", "年龄"],
+      phone: ["mobile", "telephone", "tel", "contactPhone", "联系电话", "电话"],
+      company: ["employer", "workUnit", "organization", "单位", "工作单位"],
+      position: ["occupation", "job", "title", "role", "职务", "职业", "职位"],
+      city: ["location", "residenceCity", "所在城市"],
+      notes: ["remark", "remarks", "description", "备注"],
     },
     educations: {
       educationType: ["educationCategory", "educationNature", "学历类型"],
@@ -798,7 +828,6 @@
     if (!Array.isArray(rawRows)) return [];
 
     return rawRows
-      .slice(0, CUSTOM_FIELD_SLOTS)
       .filter((item) => item && typeof item === "object")
       .map((item) => ({
         name: String(item.name ?? "").trim().slice(0, 60),
@@ -895,8 +924,8 @@
         const customRows = Array.isArray(profile?.[section.key]?.customFields)
           ? profile[section.key].customFields
           : [];
-        const customSlotCount =
-          mode === "max" ? CUSTOM_FIELD_SLOTS : customRows.length;
+        // 没有预分配的槽位；目录只暴露用户实际创建的自定义字段。
+        const customSlotCount = customRows.length;
 
         for (let slotIndex = 0; slotIndex < customSlotCount; slotIndex += 1) {
           const customName = String(customRows[slotIndex]?.name || "").trim();
@@ -984,7 +1013,7 @@
   }
 
   window.ResumeSchema = {
-    version: 5,
+    version: 6,
     customFieldSlots: CUSTOM_FIELD_SLOTS,
     sections: SECTION_DEFINITIONS,
     clone,

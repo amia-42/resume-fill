@@ -11,7 +11,7 @@
   function () {
     "use strict";
 
-    const CONTENT_SCRIPT_VERSION = "2026-09-27-custom-combobox-v7";
+    const CONTENT_SCRIPT_VERSION = "2026-10-07-adaptive-groups-v9";
 
     function contentScriptHasDiagnosticsSupport(status) {
       return Boolean(

@@ -30,11 +30,17 @@ function loadPayloadHelpers() {
     const document = { title: "Example Form" };
     ${extractFunction(
       contentSource,
-      "function buildFieldMappingPayload(fields, resumeProfile) {",
+      "function buildUnmappedFieldList(fields, mappingById, adaptiveDecisions) {",
+      "function buildFieldGroupPayload(fields, groups = null) {"
+    )}
+    ${extractFunction(
+      contentSource,
+      "function buildFieldGroupPayload(fields, groups = null) {",
       "function normalizeMappings(rawMappings, fields) {"
     )}
     module.exports = {
       schema,
+      buildUnmappedFieldList,
       buildFieldMappingPayload,
     };
   `;
@@ -71,6 +77,31 @@ test("buildFieldMappingPayload only includes resume fields with values", () => {
   assert.ok(payload.resumeFields.every((field) => field.hasValue === true));
 });
 
+test("unmapped field payload keeps group context without exposing runtime nodes", () => {
+  const helpers = loadPayloadHelpers();
+  const fields = [
+    {
+      fieldId: "f_1",
+      label: "户籍地址",
+      kind: "text",
+      sectionLabel: "联系信息",
+      groupLabel: "地址",
+      groupPath: [{ groupId: "g_1", label: "地址", kind: "section", index: null }],
+      groupFieldLabels: ["户籍地址"],
+      context: "联系信息",
+    },
+    { fieldId: "f_2", label: "邮箱", kind: "text" },
+  ];
+  const mappings = new Map([["f_2", { fieldId: "f_2", resumePath: "personal.email" }]]);
+  const result = helpers.buildUnmappedFieldList(fields, mappings, new Map());
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0].fieldId, "f_1");
+  assert.equal(result[0].groupLabel, "地址");
+  assert.deepEqual(result[0].groupFieldLabels, ["户籍地址"]);
+  assert.equal("el" in result[0], false);
+});
+
 test("buildFieldMappingPayload exposes section custom fields with user-defined labels", () => {
   const helpers = loadPayloadHelpers();
   const profile = helpers.schema.createEmptyResumeProfile();
@@ -105,4 +136,48 @@ test("buildFieldMappingPayload exposes section custom fields with user-defined l
     payload.resumeFields.some((field) => field.path.endsWith(".name")),
     false
   );
+});
+
+test("buildFieldMappingPayload sends page field groups alongside fields", () => {
+  const helpers = loadPayloadHelpers();
+  const profile = helpers.schema.createEmptyResumeProfile();
+  profile.personal.fullName = "张三";
+  const fields = [
+    {
+      fieldId: "f_1",
+      label: "姓名",
+      kind: "text",
+      groupId: "g_family_1",
+      groupLabel: "家庭情况",
+      groupIndex: 1,
+      groupFieldLabels: ["姓名", "关系", "职位"],
+    },
+    {
+      fieldId: "f_2",
+      label: "关系",
+      kind: "text",
+      groupId: "g_family_1",
+      groupLabel: "家庭情况",
+      groupIndex: 1,
+      groupFieldLabels: ["姓名", "关系", "职位"],
+    },
+  ];
+  Object.defineProperty(fields, "__groups", {
+    value: [
+      {
+        groupId: "g_family_1",
+        label: "家庭情况",
+        kind: "record",
+        index: 1,
+        fieldIds: ["f_1", "f_2"],
+        fieldLabels: ["姓名", "关系"],
+      },
+    ],
+  });
+
+  const payload = helpers.buildFieldMappingPayload(fields, profile);
+  assert.equal(payload.groups.length, 1);
+  assert.equal(payload.groups[0].label, "家庭情况");
+  assert.deepEqual(payload.groups[0].fieldIds, ["f_1", "f_2"]);
+  assert.equal(payload.fields[0].groupIndex, 1);
 });

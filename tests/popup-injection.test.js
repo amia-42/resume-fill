@@ -15,6 +15,7 @@ test("popup fallback injection includes all shared content helpers", () => {
   assert.match(source, /shared\/field-semantics\.js/);
   assert.match(source, /shared\/fill-runtime\.js/);
   assert.match(source, /shared\/content-bridge\.js/);
+  assert.match(source, /shared\/field-groups\.js/);
   assert.match(source, /shared\/ai-client\.js/);
   assert.match(source, /content\.js/);
 });
@@ -35,6 +36,24 @@ test("popup fill runner sends mode and scope for new fill actions", () => {
   assert.match(source, /scope: actionConfig\.scope/);
   assert.match(source, /incrementalPage/);
   assert.match(source, /selection/);
+});
+
+test("popup exposes selectable unmapped fields and module recommendation flow", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "../popup.js"),
+    "utf8"
+  );
+  const html = fs.readFileSync(
+    path.join(__dirname, "../popup.html"),
+    "utf8"
+  );
+
+  assert.match(html, /id="unmappedFieldsPanel"/);
+  assert.match(html, /id="addSelectedUnmappedBtn"/);
+  assert.match(source, /renderUnmappedFields/);
+  assert.match(source, /recommendAndAddSelectedUnmappedFields/);
+  assert.match(source, /unmapped_field_module_recommendation/);
+  assert.match(source, /schema\.normalizeResumeProfile/);
 });
 
 test("manifest grants HTTP(S) access after switching the side panel to any web tab", () => {

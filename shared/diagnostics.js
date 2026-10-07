@@ -112,6 +112,13 @@
     }
 
     function formatFieldSummary(field) {
+      const group = compactText(field?.groupLabel || field?.groupId);
+      const groupIndex = Number.isFinite(Number(field?.groupIndex))
+        ? `#${Number(field.groupIndex)}`
+        : "";
+      const groupPath = Array.isArray(field?.groupPath)
+        ? field.groupPath.map((item) => compactText(item?.label || item?.groupId)).filter(Boolean).join(" > ")
+        : "";
       return [
         "[扫描]",
         compactText(field?.fieldId) || "(no-field-id)",
@@ -121,6 +128,9 @@
         `id=${summarizeValue(field?.id)}`,
         `placeholder=${summarizeValue(field?.placeholder)}`,
         `section=${summarizeValue(field?.sectionLabel)}`,
+        `group=${summarizeValue(group ? `${group}${groupIndex}` : "")}`,
+        `groupPath=${summarizeValue(groupPath)}`,
+        `groupFields=${summarizeOptions(field?.groupFieldLabels)}`,
         `nearby=${summarizeOptions(field?.nearbyLabels)}`,
         `options=${summarizeOptions(field?.options)}`,
         `context=${summarizeValue(field?.context, { maxLength: 120 })}`,
@@ -128,12 +138,14 @@
     }
 
     function formatMappingSummary(field, mapping, { source = "ai" } = {}) {
+      const group = compactText(field?.groupLabel || field?.groupId);
       return [
         `[映射:${compactText(source) || "ai"}]`,
         compactText(field?.fieldId) || "(no-field-id)",
         `${summarizeValue(field?.label)} -> ${
           compactText(mapping?.resumePath) || "(unmapped)"
         }`,
+        `group=${summarizeValue(group)}`,
         `transform=${formatTransform(mapping?.transform)}`,
         `reason=${summarizeValue(mapping?.reason, { maxLength: 120 })}`,
       ].join(" ");

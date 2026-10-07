@@ -28,7 +28,7 @@ function loadContentSecurityHelpers() {
     ${extract(contentSource, "function sanitizePageUrl(value) {", "function cssEscape(value) {")}
     ${extract(contentSource, "function normalizeMappings(rawMappings, fields) {", "function normalizeTransform(transform) {")}
     ${extract(contentSource, "function normalizeTransform(transform) {", "function deriveFillValue(rawValue, transform, runtime) {")}
-    module.exports = { normalizeMappings, sanitizePageUrl };
+    module.exports = { normalizeMappings, sanitizePageUrl, schema };
   `;
   const context = { module: { exports: {} }, exports: {}, window: {}, URL };
   vm.createContext(context);
@@ -58,4 +58,21 @@ test("mapping paths are restricted to the schema catalog", () => {
   assert.equal(mappings[0].resumePath, "personal.email");
   assert.equal(mappings[1].resumePath, "");
   assert.equal(mappings[2].resumePath, "");
+});
+
+test("mapping paths accept custom fields beyond the former twelve-slot limit", () => {
+  const helpers = loadContentSecurityHelpers();
+  const profile = helpers.schema.createEmptyResumeProfile();
+  profile.skills.customFields = Array.from({ length: 20 }, (_, index) => ({
+    name: `字段${index + 1}`,
+    value: `值${index + 1}`,
+  }));
+
+  const mappings = helpers.normalizeMappings(
+    [{ fieldId: "f_custom", resumePath: "skills.customFields.19.value" }],
+    [{ fieldId: "f_custom" }],
+    profile
+  );
+
+  assert.equal(mappings[0].resumePath, "skills.customFields.19.value");
 });
